@@ -44,23 +44,28 @@
 // nothing about the ones that are present.
 
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, it } from 'node:test';
-import { promisify } from 'node:util';
 
 import { REPO_ROOT } from '../scripts/lib/specs.mjs';
 import { loadDist } from './lib/dist.mjs';
 
-const execFileAsync = promisify(execFile);
-
 const { Cafaye, serviceNames } = await loadDist('index.js');
 
-// Three credentials, one per shape the fleet mints. A class that guarded only
-// the `cafaye_` prefix would pass a test carrying only an API token.
-const API_TOKEN = `cafaye_${'Kx7Qm2Rb9Tv4Pw6Zc1Nh8Ls5Dj3Fg0Hy'.slice(0, 43)}`;
-const SESSION_TOKEN = 'Rt5Wq1Xs8Cd2Mf7Kg4Bn9Zp3Vh6Lj0Uy';
+/**
+ * Three credentials, one per shape the fleet mints, at the shapes the fleet
+ * actually mints them.
+ *
+ * Both opaque values are 43 base64url characters, because both are
+ * `base64.RawURLEncoding` over 32 random bytes and 32 bytes is 256 bits — the
+ * same order as a UUIDv4. identity's `internal/sessions/token.go` and
+ * `internal/apikeys/apikeys.go` are the two places that say so, and the API token
+ * is `cafaye_` plus the same 43. A class that guarded only the `cafaye_` prefix
+ * would pass a test carrying only an API token, which is why all three are here.
+ */
+const API_TOKEN = `cafaye_${'J0fwN4jAR8nEVarIZevM3izQ7mDU_qHYduL2hyP6lCT'}`;
+const SESSION_TOKEN = '3izQ7mDU_qHYduL2hyP6lCT-pGXctK1gxO5kBS9oFWb';
 const JWT_TOKEN = `${Buffer.from(JSON.stringify({ alg: 'ES256', kid: 'cafaye-1' })).toString('base64url')}.${'B'.repeat(86)}.${'C'.repeat(43)}`;
 
 const CREDENTIALS = [API_TOKEN, SESSION_TOKEN, JWT_TOKEN, `__Host-session=${SESSION_TOKEN}`];
@@ -662,11 +667,7 @@ describe('the source contains no logging and no telemetry', () => {
     // requires zero, `test/no-runtime-dependencies.test.mjs` asserts it, and
     // asserting it here as well is cheap — this file's claim is "nothing can
     // leave", and a dependency is a door.
-    const manifest = JSON.parse(
-      await execFileAsync(process.execPath, ['-e', 'process.stdout.write(require("node:fs").readFileSync("package.json","utf8"))'], {
-        cwd: REPO_ROOT,
-      }).then(({ stdout }) => stdout),
-    );
+    const manifest = JSON.parse(await readFile(path.join(REPO_ROOT, 'package.json'), 'utf8'));
     assert.deepEqual(manifest.dependencies ?? {}, {});
   });
 });

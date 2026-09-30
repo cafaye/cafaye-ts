@@ -59,7 +59,7 @@ commit that caused it and the one line that changes to opt back in.
   generated client, with this class's base URL and credential already on it, for a
   route the documents do not describe. Named so its cost is visible: errors from
   it are the generated envelope, not typed exceptions.
-- **Seven test files and 120 new assertions, and four defects they found.** The
+- **Seven test files and 121 new assertions, and four defects they found.** The
   notable one: this class emitted nothing at all, and that is now a tested
   property rather than an intention — every console method and both streams are
   captured across all seven code paths, `src/cafaye/` is scanned for a console
