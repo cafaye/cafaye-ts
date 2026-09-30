@@ -1,0 +1,147 @@
+# gate.yml — how cafaye-ts is gated, declared rather than guessed.
+#
+# WHY THIS FILE IS HERE, AND WHAT IT IS NOT. core owns the format
+# (schemas/gate.schema.json), the checker (harness/gate_check.py) and the
+# reasoning (docs/gate.md). This file is one repository telling the truth about
+# itself against that format, and "one repository" is the whole job: every claim
+# below was measured on THIS tree. Two of them could have been wrong and were —
+# what the suite actually prints, and what the gate does when the pinned
+# toolchain is not the one on PATH. Both measurements are quoted where they are,
+# because a declaration whose comments say "measured" and whose numbers were
+# guessed is worse than no comment at all.
+version: 1
+name: cafaye-ts
+
+gate:
+  # `mise run prime`, NOT `./bin/prime`, and the difference is not cosmetic.
+  #
+  # Measured on this repository, 2026-09-30: with node 22.12.0 — the version
+  # mise activates one directory up, and a perfectly ordinary thing to have on
+  # PATH — `./bin/prime` exits 0 with `# pass 187`. npm prints EBADENGINE for
+  # cafaye-ts and for all five @hey-api packages, and nothing fails. Neither
+  # `engines.node: ">=22.19.0"` in package.json nor
+  # `@hey-api/openapi-ts`'s own `>=22.18.0` is enforced by `npm ci`; they are
+  # warnings, and a warning is not a gate. So a bare `bin/prime` is a gate that
+  # can be green against a toolchain this repository never chose — which is the
+  # hazard bin/prime's own header warns about, arriving anyway, by the most
+  # obvious route. `mise run prime` applies the pin from mise.toml, so the
+  # `==> node v22.19.0` in the log is a number the declaration can stand behind.
+  #
+  # The cost of this choice, stated rather than hidden: `command[0]` is then a
+  # bare name, so `check_command` cannot see the file and reports
+  # `gate.command-unknown` on a machine without mise. That is the checker's
+  # designed answer for "this is a claim about the machine", and it is the right
+  # one here — but it does mean `entrypoint`, below, is what carries the
+  # on-disk proof for this gate.
+  command: [mise, run, prime]
+  # The fleet's spelling, and this repository's own: the header of mise.toml
+  # names `mise run prime` as the gate in as many words.
+  miseTask: prime
+  # The file behind both. `mise run prime` and CI's `./bin/prime` are one gate
+  # reached two ways, and this is the single file the two agree on — which is
+  # the one thing `gate.task-unresolvable` exists to keep them agreeing about.
+  entrypoint: bin/prime
+  # Measured 45s (direct, warm cache) and 66s (through `mise run`, cold npm
+  # cache) on an M-series laptop. A cold CI runner pays for 54 packages first, on
+  # a network nobody here controls. Deliberately generous, and the reason is the
+  # one core's own gate.yml gives: a floor tight enough to catch a hang is tight
+  # enough to flake on somebody's first run, and a flaky gate is a gate people
+  # stop reading.
+  timeoutSeconds: 900
+  proof:
+    # 1. The suite's own count. This is the decrease-detector, and it is the
+    #    only one of the three that has a floor.
+    #
+    #    187 is what `npm test` reported on this tree, measured, and it is
+    #    raised in the same commit that adds a test — a floor left behind is a
+    #    floor nobody notices has stopped protecting anything. A suite that
+    #    quietly lost forty tests cannot report itself as passing.
+    #
+    #    It is also the line that proves the runner reached its summary at all,
+    #    and that is not a formality here. Measured on node 22.19.0: `node
+    #    --test` pointed at a glob that matches no file prints `# pass 0` and
+    #    exits 0. That is the cafaye-rb defect — a tier that filtered itself out
+    #    of existence, a green, and nothing that noticed — reproduced in
+    #    TypeScript. 0 < 187, so it is red here.
+    - id: suite-pass
+      match: '^# pass ([0-9]+)$'
+      minimum: 187
+    # 2. Nothing skipped, in the suite's own words.
+    #
+    #    This is the proof the count above cannot make on its own, and the case
+    #    was measured rather than imagined. A test rewritten as `test.skip`
+    #    raises `# tests` and leaves `# pass` at 187 — the number a reader is
+    #    scanning moves, and the number this floor reads does not. `# skipped`
+    #    is the only line that moves with it. core's rule is that a skipped check
+    #    is not a passing check, and `# skipped 0` is that rule in a form the
+    #    checker can read.
+    - id: suite-no-skip
+      match: '^# skipped 0$'
+    # 3. Two of this gate's three steps are silent when they succeed. `npm ci`
+    #    prints a package count; `tsc --noEmit` prints NOTHING on success. So
+    #    absent this proof, nothing in the whole log is evidence that the frozen
+    #    install and the type check over the 96 generated files both succeeded,
+    #    and `gate.proof` cannot see two thirds of the gate.
+    #
+    #    bin/prime echoes `==> npm test` only after `npm run typecheck` has
+    #    returned 0, under `set -euo pipefail`. Reaching that line is the
+    #    evidence. This proof is therefore coupled to a human-editable echo, and
+    #    that is the intended direction of travel: reword the echo and the
+    #    declaration goes red, because at that point the declaration can no
+    #    longer see what the gate did. Update both in one commit.
+    - id: install-and-typecheck
+      match: '^==> npm test$'
+
+external:
+  # NOT self-contained, and saying so is the point of the block. A reader can
+  # tell from this file, without running anything, that a green gate here needed
+  # a toolchain mise had to install and a registry npm had to reach. The
+  # declaration that said `true` would be describing a gate nobody has ever run
+  # on a clean machine.
+  selfContained: false
+  requirements:
+    - kind: toolchain
+      name: node 22.19.0 and the npm that ships with it, installed by mise from mise.toml
+      satisfy:
+        command: [mise, install]
+        # Observed, not predicted: `env -i PATH=/usr/bin:/bin bin/prime` prints
+        # this and exits 127. Note what the same command does NOT do — it is
+        # only `mise run prime` that turns an unpinned node on PATH into a
+        # failure rather than a warning; see the comment on `command` above.
+        unmet: bin/prime exits 127 with "prime: node is not on PATH. Run 'mise install' first"
+    - kind: network
+      name: the npm registry, or a ~/.npm cache already holding every tarball in package-lock.json
+      satisfy:
+        command: [npm, ci]
+        # Observed, not predicted: `npm ci --offline` against an empty cache
+        # prints this and exits 1, leaving no node_modules/. `npm ci` deletes
+        # node_modules and reinstalls the lockfile from scratch on EVERY run —
+        # this is core's "PyPI, once, on a cold checkout", except npm has no
+        # step that only runs once, so it is a requirement on every gate run and
+        # a cache is what makes it invisible.
+        unmet: bin/prime's npm ci step exits 1 with "npm error code ENOTCACHED" and leaves no node_modules/
+  # NOT required, and named here so nobody goes looking for them: no database, no
+  # service, no credential, and no network once npm's cache is warm.
+  #
+  # The last one is the one that would be got wrong here, because
+  # test/suite-is-offline.test.mjs exists precisely to keep the SUITE offline.
+  # That test is about the 187 tests and it holds: they never fetch the six
+  # OpenAPI documents, because the vendored bytes under specs/ are the artifact
+  # and the shas in specs/index.json are their provenance. The gate is a
+  # different question. `npm ci` reaches the registry before any test runs, so
+  # the offline suite does not make the offline gate.
+
+ci:
+  workflow: .github/workflows/ci.yml
+  # CI runs the SCRIPT, not the task, and that is deliberate rather than an
+  # inconsistency: actions/setup-node puts an explicit node on PATH, so CI pins
+  # the toolchain without mise being involved at all. `invokes` is allowed to
+  # name a different spelling of the same entrypoint, which is why this is
+  # bin/prime and not `mise run prime` — the workflow has never run mise.
+  #
+  # The matrix runs node 22.19.0 AND node 24. Node 24 is above the floor and not
+  # the pinned version, and it is not a contradiction of the requirement above:
+  # a floor that has only ever been tested AT the floor is a floor nobody has
+  # checked anything above. CI proves both halves; the local gate proves the
+  # pinned one, which is the one a local run can be trusted to have used.
+  invokes: [bin/prime]

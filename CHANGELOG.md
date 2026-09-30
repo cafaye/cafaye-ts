@@ -11,6 +11,52 @@ commit that caused it and the one line that changes to opt back in.
 
 ### Added
 
+- **`gate.yml` — the gate is declared rather than discovered, and the declaration
+  is load-bearing.** core ships the format (`schemas/gate.schema.json`), the
+  checker (`harness/gate_check.py`) and the reasoning (`docs/gate.md`); this
+  repository now tells the truth about itself against it in one checked file:
+  the command, the mise task, the entrypoint, what the gate needs from the
+  machine, and the lines its own output must contain before "green" means
+  anything. Two of the claims were measured rather than assumed, and the first
+  one changed the declaration.
+  - **The declared command is `mise run prime`, not `bin/prime`, because
+    `bin/prime` is green on a node this repository forbids.** Measured here, on
+    node 22.12.0 — the version mise activates one directory up, and an ordinary
+    thing to have on PATH: `./bin/prime` exits 0 with 187 passing tests. npm
+    prints `EBADENGINE` for this package and for all five `@hey-api` packages
+    and nothing fails, because neither `engines.node: ">=22.19.0"` nor
+    `@hey-api/openapi-ts`'s own `>=22.18.0` is enforced by `npm ci`. Both are
+    warnings. `mise run prime` applies the pin from `mise.toml`, which is what
+    makes the toolchain requirement load-bearing instead of decorative.
+  - **Three proofs, because the log is not equally informative about all three
+    steps.** `# pass 187` is the decrease-detector and the floor.
+    `# skipped 0` is separate because a test rewritten as `.skip` raises
+    `# tests` and leaves `# pass` at 187 — measured, not imagined — so the count
+    a reader scans moves while the count the floor reads does not. And `tsc
+    --noEmit` prints **nothing** on success, so `==> npm test` is the only line in
+    the whole log that is evidence the frozen install and the type check over the
+    96 generated files both succeeded.
+  - **`selfContained: false`, with two requirements and each one's `unmet`
+    observed rather than predicted.** node 22.19.0, and the npm registry or an
+    npm cache already holding the tree — `npm ci` reinstalls the lockfile from
+    scratch on every run, so this one is not "once, on a cold checkout" the way
+    core's PyPI requirement is. No database, no service, no credential.
+    `test/suite-is-offline.test.mjs` keeps the *suite* offline and that is
+    still true; `npm ci` runs before any test does, so the offline suite does not
+    make the gate offline.
+  - **`test/gate_self_test.sh` (`mise run gate-self-test`) is the proof that the
+    proof works.** It copies the repository thirteen times, breaks exactly one
+    thing in each, and asserts core's checker goes red *and names the finding the
+    case was written for* — after a control on the unmodified copy, because
+    thirteen reds against a repository that was already red prove nothing. Twelve
+    are string comparisons. The thirteenth is the one that matters: pointing
+    `npm test` at a glob that matches no file prints `# pass 0` and **exits 0**,
+    which is the cafaye-rb defect reproduced in TypeScript, and the floor is the
+    only thing standing between it and a green badge. It is not part of
+    `bin/prime` — the gate runs the checker, the checker runs the gate, and a
+    gate that verifies itself by running itself terminates — and it exits **2**
+    rather than skipping when it cannot find a core checkout.
+
 - **`Cafaye` — the hand-written client, and the whole integration is now four
   lines.** `new Cafaye({ baseUrl })` gives you `cafaye.identity.getCurrentUser()`
   and its five siblings, and the return value is the operation's **data** rather
