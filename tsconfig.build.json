@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "//": "Used by `npm run build`, which produces the `dist/` the published tarball ships. The generator writes TypeScript into src/services/ and THAT is what is committed; this compiles it to the JavaScript and declarations a consumer installs. See AGENTS.md, 'What ships'.",
+  "//maps": "sourceMap and declarationMap are both OFF, and that is a decision rather than an omission. A source map in the tarball points at a `.ts` file that is not in the tarball, so it resolves to nothing for every consumer; a declarationMap does the same damage to the TypeScript editor experience. Shipping maps that reference absent sources is worse than shipping none, and this tree is generated code whose formatting has nothing to reveal — the sources are in the repository, at the commit each file's header names. The development tsconfig needs neither, because `tsc --noEmit` emits nothing for maps to describe.",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "noEmit": false,
+    "sourceMap": false,
+    "declarationMap": false
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist", "test", "scripts", "openapi-ts.config.ts"]
+}

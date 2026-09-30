@@ -1,0 +1,46 @@
+# Toolchain pins for this repository. The worktree and CI must agree, so the
+# versions live here rather than in whatever the machine happens to have
+# installed.
+#
+#   mise install        # install the pinned toolchain
+#   mise run prime      # the gate: npm ci, typecheck, the full test suite
+#
+# WHY THESE NUMBERS
+#   - node 22.19.0 clears `@hey-api/openapi-ts@0.99.0`'s own `engines.node:
+#     ">=22.18.0"`. The generator is the only thing here with a hard floor
+#     worth chasing, and the generator is the thing that has to run. It is also
+#     the same number `docs` pins, so one `mise install` serves the two
+#     TypeScript repositories in the fleet.
+#   - package.json repeats the floor as `engines.node`, for the same reason docs
+#     does: a contributor without mise must still get an install that either
+#     works or fails loudly, not one that fails inside the generator. Two
+#     places, one number; raise both in the same commit.
+#   - npm is not pinned separately. It ships with node, so pinning it would be
+#     pinning a version of node's own tarball. (docs/mise.toml says the same
+#     thing, for the same reason.)
+#   - There is no `typescript` pin HERE, and that is deliberate. MD6's second
+#     load-bearing pin is a `typescript@5` EXACT pin, and it lives in
+#     package.json's devDependencies where the tool that reads it can see it.
+#     A toolchain pin in mise and a dependency pin in a manifest are two
+#     different facts: mise decides which compiler is on PATH, npm decides
+#     which one hey-api's transformers `import`. Only the second one is the
+#     cliff MD6 describes. Duplicating the number here would create a second
+#     copy to keep in sync for no additional guarantee.
+[tools]
+node = "22.19.0"
+
+[tasks.prime]
+description = "The gate: npm ci, typecheck, the full test suite"
+run = "./bin/prime"
+
+[tasks.generate]
+description = "Regenerate the client for all six services from the vendored documents"
+run = "npm run generate"
+
+[tasks.vendor]
+description = "Re-vendor the six OpenAPI documents at the shas in specs/index.json"
+run = "npm run vendor"
+
+[tasks.verify]
+description = "Assert the vendored documents still match specs/index.json"
+run = "npm run verify:specs"

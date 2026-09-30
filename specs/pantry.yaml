@@ -1,0 +1,560 @@
+# openapi/v1.yaml — pantry's HTTP contract.
+#
+# Written against core's docs/openapi-conventions.md: every path under one /v1
+# prefix, info.version present, every non-2xx an application/problem+json with a
+# reserved code, X-Trace-Id on every response, cursor pagination on the
+# collection.
+#
+# This is the document `caf pantry` is generated from, so it is the machine half
+# of the README's response-shape table. The two are the same contract written
+# twice and tests/api.rs fails when they disagree in either direction: every
+# operation here must be served by the router, and every route the router serves
+# must be here.
+#
+# Two places where pantry's own answer is narrower than core's, both stated in
+# the README rather than left to be discovered:
+#
+#  - `method_not_allowed` (405) is not in core's reserved code list. A client
+#    generated from this document needs to branch on it, and core's conventions
+#    say the list is where such codes go, so it is recorded here for the manager
+#    rather than invented quietly.
+#  - Cursors do not expire. core says a cursor older than 24 hours answers
+#    `cursor_expired`; the registry is repository data that does not change
+#    between deploys, so there is nothing for a stale cursor to mis-read.
+openapi: 3.1.0
+
+info:
+  title: cafaye pantry
+  # 1.1.0: `cli` is added to the `kind` enum and to the `?kind=` vocabulary.
+  # A Minor bump under the versioning table at the bottom of CHANGELOG.md —
+  # "breaking change to a response, a filter or a code" — because a client
+  # generated from 1.0.0 switches on `kind` exhaustively and now has a value it
+  # has not handled. It is the right kind of break: the old vocabulary could not
+  # express `caf`, so the registry was publishing `api` for a binary.
+  version: 1.1.0
+  summary: The cafaye service registry.
+  description: |
+    `pantry` is what a cafaye service *is*: its identity, the contract it
+    exposes, and how to reach it. It exists so `caf dev`, `caf deploy` and a
+    developer reading the platform read one answer instead of a hardcoded list
+    in each of them.
+
+    ## Official-only
+
+    Every entry is an official cafaye service curated in pantry's own repository
+    and verified against the real service's `cafaye.yml` on every test run.
+    There is no submission flow, no third-party registration, no registration
+    webhook and no plugin loader. Adding a service is a commit and a reviewed
+    pull request.
+
+    ## Field provenance
+
+    A service object is the service's own manifest, spelled exactly as the
+    manifest spells it, plus two registry facts a manifest cannot carry because
+    core closes `cafaye.yml` with `additionalProperties: false`:
+
+    | field      | source |
+    | ---------- | ------ |
+    | `name`, `description`, `language`, `core`, `exposes`, `consumes`, `dependencies`, `repository`, `owner` | the service's own `cafaye.yml` |
+    | `kind`     | pantry's registry index — a manifest cannot state it |
+    | `basePath` | derived from the service's OpenAPI document; `null` when it publishes none |
+
+    ## No database
+
+    The registry is repository data read from disk at startup. `/readyz` reports
+    `503` when it did not load, and `/healthz` still reports `200` — the process
+    is alive, it simply has nothing to serve, and restarting it would not help.
+
+    ## Probes
+
+    `/healthz` and `/readyz` are infrastructure and are deliberately not under
+    the `/v1` prefix, per core's conventions.
+  contact:
+    name: pantry
+    email: pantry@cafaye.com
+
+servers:
+  - url: https://pantry.cafaye.com
+    description: Production
+  - url: http://localhost:8080
+    description: Local
+
+security: []
+
+paths:
+  /v1/services:
+    get:
+      operationId: listServices
+      summary: The official cafaye service registry
+      description: |
+        Returns the registered services, optionally narrowed by `kind`, `language`
+        and `contract`.
+
+        A filter that matches nothing is `200` with `"data": []`. It is never a
+        `404`: "no service matches" and "there is no such collection" are
+        different answers, and only one of them is true.
+
+        A filter value outside its vocabulary is a `400` naming the parameter and
+        what was allowed. An empty parameter value (`?kind=`) is a `400` too —
+        it is not the same as not asking for the filter. An unknown parameter is
+        also a `400`, so a client that asks a question this version cannot answer
+        is told rather than quietly given the whole list.
+      parameters:
+        - name: kind
+          in: query
+          required: false
+          description: |
+            Narrow to services of one kind. `api` serves HTTP and consumes
+            nothing, `worker` has no declared HTTP surface and does event work,
+            `both` serves HTTP and consumes events, and `cli` is a binary —
+            installed and run rather than brought up and routed to. `api` and
+            `cli` are also the two curated values: a service whose manifest
+            declares no contract surface is one of those two by a recorded
+            judgement rather than by derivation.
+          schema:
+            $ref: '#/components/schemas/ServiceKind'
+        - name: language
+          in: query
+          required: false
+          description: |
+            Narrow to one implementation language. This is core's manifest
+            `language` enum minus `spec`: a specification repository is not a
+            service and cannot be a registry entry, so `?language=spec` is a
+            `400` rather than an empty list.
+          schema:
+            $ref: '#/components/schemas/Language'
+        - name: contract
+          in: query
+          required: false
+          description: |
+            Narrow to services whose own `core` constraint shares a version with
+            this range. The comparison is range intersection, not string
+            equality: `>=0.2.0` matches a service pinned to `^0.2.0`, and
+            `^0.2.0` does not match a service pinned to `^0.1.0` because before
+            1.0 a caret pins the minor.
+
+            The grammar is core's four forms and nothing else: `MAJOR.MINOR.PATCH`,
+            `^`, `~` and `>=`. Anything else is a `400`.
+          schema:
+            type: string
+            pattern: '^(\^|~|>=)?[0-9]+\.[0-9]+\.[0-9]+$'
+          example: '^0.2.0'
+        - name: limit
+          in: query
+          required: false
+          description: 'Page size. Defaults to 25, capped at 100.'
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 25
+        - name: cursor
+          in: query
+          required: false
+          description: |
+            Opaque base64url cursor from a previous response's
+            `page.next_cursor`. Clients must not parse it and its encoding may
+            change without notice. A cursor this service did not issue is a
+            `400` — never silently page one, which loses rows without saying so.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The registry, filtered and paged. `data` is always an array.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceList'
+              examples:
+                default:
+                  value:
+                    data:
+                      - name: identity
+                        description: >-
+                          Authentication, sessions, MFA, OAuth, accounts and tenancy,
+                          and the OIDC provider.
+                        language: go
+                        kind: api
+                        core: ^0.1.0
+                        basePath: /v1
+                        exposes:
+                          api: openapi/v1.yaml
+                          events:
+                            - identity.user.created
+                        consumes: []
+                        dependencies: []
+                        repository:
+                          url: git@github.com:cafaye/identity.git
+                          defaultBranch: master
+                          visibility: public
+                        owner:
+                          team: identity
+                          contact: identity@cafaye.com
+                    page:
+                      next_cursor: null
+                      has_more: false
+        '400':
+          description: A query parameter outside its vocabulary, or an unusable cursor.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '503':
+          description: |
+            The registry did not load, so there is nothing to answer with. A `200`
+            with an empty `data` would be indistinguishable from a platform with
+            no services.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /v1/services/{name}:
+    get:
+      operationId: getService
+      summary: One registered service
+      description: |
+        The same object the list wraps, so a client reads one shape rather than
+        two. An unknown name is a `404`; a name that exists but matches a filter
+        is not a `404`, because no filter applies here.
+      parameters:
+        - name: name
+          in: path
+          required: true
+          description: The cafaye namespace name, which is also the repository name.
+          schema:
+            type: string
+            pattern: '^[a-z][a-z0-9]*(-[a-z0-9]+)*$'
+          example: identity
+      responses:
+        '200':
+          description: The service.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Service'
+        '404':
+          description: No official cafaye service is registered under that name.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                default:
+                  value:
+                    type: https://errors.cafaye.com/not_found
+                    title: Not found
+                    status: 404
+                    detail: no official cafaye service is named "nope"
+                    instance: /v1/services/nope
+                    code: not_found
+                    trace_id: 0af7651916cd43dd8448eb211c80319c
+        '503':
+          description: The registry did not load.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /healthz:
+    get:
+      operationId: healthz
+      summary: Liveness
+      description: |
+        `200` whenever the process is running — including when the registry did
+        not load. A process that cannot serve is still alive, and an orchestrator
+        that restarts on this would turn a data problem into a crash loop.
+      responses:
+        '200':
+          description: The process is running.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+
+  /readyz:
+    get:
+      operationId: readyz
+      summary: Readiness
+      description: |
+        `200` only when the registry loaded and every entry validated against
+        core's manifest schema. This is the one probe that knows whether there is
+        anything to serve.
+      responses:
+        '200':
+          description: The registry is loaded, and `services` counts it.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Readiness'
+        '503':
+          description: The registry did not load; the detail names what could not be read.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+components:
+  headers:
+    TraceId:
+      description: |
+        Always present, and always equal to the `trace_id` in the body when the
+        body is a problem. Support starts from this id. An inbound
+        `traceparent`'s trace-id is propagated unchanged (PLAN.md §7).
+      required: true
+      schema:
+        type: string
+        pattern: '^[0-9a-f]{32}$'
+      example: 0af7651916cd43dd8448eb211c80319c
+
+  schemas:
+    ServiceList:
+      type: object
+      additionalProperties: false
+      description: A page of registered services.
+      required: [data, page]
+      properties:
+        data:
+          type: array
+          description: Always an array, empty rather than absent. Sorted by name.
+          items:
+            $ref: '#/components/schemas/Service'
+        page:
+          $ref: '#/components/schemas/Page'
+
+    Page:
+      type: object
+      additionalProperties: false
+      description: core's paging envelope.
+      required: [next_cursor, has_more]
+      properties:
+        next_cursor:
+          type: [string, 'null']
+          description: Opaque; null on the last page.
+        has_more:
+          type: boolean
+
+    Service:
+      type: object
+      description: |
+        One registered service: its manifest, plus `kind` and `basePath`.
+
+        Optional keys are omitted rather than null when the service's manifest
+        omits them — `defaultBranch`, `visibility`, `contact`, `description` and a
+        dependency's `version`/`required`. Two keys are always present and may be
+        null, because null there is a fact rather than an absence: `exposes` is
+        null when the manifest declares no contract surface, and `basePath` is
+        null when the service publishes no OpenAPI document.
+      required: [name, language, kind, core, basePath, exposes, consumes, dependencies, repository, owner]
+      properties:
+        name:
+          type: string
+          description: The cafaye namespace name; also the repository name and the event `source`.
+          pattern: '^[a-z][a-z0-9]*(-[a-z0-9]+)*$'
+        description:
+          type: string
+          maxLength: 200
+        language:
+          $ref: '#/components/schemas/Language'
+        kind:
+          $ref: '#/components/schemas/ServiceKind'
+        core:
+          type: string
+          description: The service's constraint on the core spec version, in core's four-form grammar.
+          pattern: '^(\^|~|>=)?[0-9]+\.[0-9]+\.[0-9]+$'
+        basePath:
+          type: [string, 'null']
+          description: |
+            The `/vN` prefix every contract path in the service's OpenAPI document
+            is under, or null when it publishes no document.
+          pattern: '^/v[0-9]+$'
+          example: /v1
+        exposes:
+          oneOf:
+            - $ref: '#/components/schemas/Exposes'
+            - type: 'null'
+          description: The service's published surface, or null when it declares none.
+        consumes:
+          type: array
+          description: Event types this service subscribes to. Empty rather than absent.
+          items:
+            type: string
+        dependencies:
+          type: array
+          description: Other cafaye services this one builds on. Empty rather than absent.
+          items:
+            $ref: '#/components/schemas/Dependency'
+        repository:
+          $ref: '#/components/schemas/Repository'
+        owner:
+          $ref: '#/components/schemas/Owner'
+
+    Exposes:
+      type: object
+      additionalProperties: false
+      required: [api, events]
+      properties:
+        api:
+          type: [string, 'null']
+          description: Repository-relative path to the service's OpenAPI 3.1 document.
+        events:
+          type: array
+          description: Event types this service publishes, as `<service>.<entity>.<action>`.
+          items:
+            type: string
+
+    Dependency:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+        version:
+          type: string
+          description: Constraint on the dependency's own contract version.
+        required:
+          type: boolean
+          description: false is a soft dependency — the service runs degraded without it.
+
+    Repository:
+      type: object
+      additionalProperties: false
+      required: [url]
+      properties:
+        url:
+          type: string
+          description: SSH remote. core's schema rejects HTTPS for a cafaye repository.
+        defaultBranch:
+          type: string
+          const: master
+        visibility:
+          type: string
+          enum: [public, private]
+
+    Owner:
+      type: object
+      additionalProperties: false
+      required: [team]
+      properties:
+        team:
+          type: string
+          description: The accountable team, not the author.
+        contact:
+          type: string
+          format: email
+
+    ServiceKind:
+      type: string
+      enum: [api, worker, both, cli]
+      description: |
+        | manifest says | kind |
+        | --- | --- |
+        | `exposes.api` declared, no `consumes` | `api` |
+        | `exposes.api` declared and `consumes` non-empty | `both` |
+        | no `exposes.api`, some event work | `worker` |
+        | no contract surface, and the repository serves HTTP | `api` |
+        | no contract surface, and the repository is a binary | `cli` |
+
+        The last two rows are **curated**, not derived, and they are the only
+        curated values. A manifest that declares no contract surface cannot say
+        which one it is: `guard` (a gateway whose OpenAPI document has not been
+        written yet) and `caf` (a binary) declare the same absence of surface,
+        and `language` names a toolchain rather than a shape. `cafaye-rb` — a
+        gem, not a registry entry — has the same shape a third time.
+
+        A client that routes or deploys by `kind` should branch on it rather
+        than assume every entry serves HTTP: `cli` is an entry `caf dev`
+        installs and nobody routes to.
+
+    Language:
+      type: string
+      enum: [go, ruby, elixir, python, typescript, rust]
+      description: |
+        core's manifest `language` enum minus `spec`. `spec` is for
+        specification-only repositories — core itself, contract-test fixtures —
+        which are not services and cannot be registered.
+
+    Health:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          const: ok
+
+    Readiness:
+      type: object
+      additionalProperties: false
+      required: [status, services]
+      properties:
+        status:
+          type: string
+          const: ok
+        services:
+          type: integer
+          description: How many services are loaded.
+
+    Problem:
+      type: object
+      description: |
+        RFC 9457 problem details with core's extensions: a stable
+        `https://errors.cafaye.com/<code>` type, a reserved `code`, and a
+        `trace_id` that always matches the `X-Trace-Id` header. No service
+        invents its own error body, so every non-2xx response — including the
+        framework's own 404 and 405 — is this shape.
+      required: [type, title, status, detail, instance, code, trace_id]
+      properties:
+        type:
+          type: string
+          format: uri
+        title:
+          type: string
+          description: A fixed human-readable summary for this code; may be reworded without a version bump.
+        status:
+          type: integer
+        detail:
+          type: string
+          description: Specific to this occurrence. Clients do not parse it.
+        instance:
+          type: string
+          description: The request path this is about.
+        code:
+          type: string
+          enum: [not_found, validation_failed, method_not_allowed, unavailable, internal]
+        trace_id:
+          type: string
+          pattern: '^[0-9a-f]{32}$'
+        errors:
+          type: array
+          description: Present only on 422. pantry answers 400 rather than 422, so it never sends this.
+          items:
+            type: object

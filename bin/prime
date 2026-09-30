@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+#
+# The gate. Everything that must be true before a commit lands.
+#
+#   bin/prime            # frozen install, typecheck, then the full test suite
+#   bin/prime --fast     # frozen install only
+#
+# WHAT IT PROMISES
+#   Exit 0: `npm ci` installed exactly what package-lock.json says, the package
+#   type-checks, and every test passes. Anything else: nonzero, with the failing
+#   step named. `set -euo pipefail` is the whole mechanism — no error handling to
+#   forget.
+#
+# WHY THESE STEPS IN THIS ORDER
+#   install, then typecheck, then test. Type-checking before testing is not a
+#   style preference: `node --test` runs the `.mjs` suite and will happily report
+#   green while the TypeScript this package actually ships has a type error in
+#   it, because the suite tests the pipeline and the pipeline does not compile
+#   the tree it produces. The type check is the only step that looks at the 96
+#   generated files as TypeScript, and MD6's claim that the 3.1 constructs
+#   survive the round trip is only worth something if something checks it.
+#
+# STRICTNESS NOTES
+#   - No `mise install` here. mise.toml pins node; this script fails loudly (127)
+#     if the toolchain is missing rather than installing it, because installing a
+#     toolchain as a side effect of running a gate is how a worktree ends up
+#     tested against a version nobody chose.
+#   - `npm ci`, never plain `npm install`: `npm ci` installs exactly the lockfile
+#     and FAILS when the lock and package.json disagree. Plain `npm install`
+#     would quietly rewrite the lock, which is how a lockfile reaches master
+#     having drifted from the manifest it claims to describe. The pinned
+#     generator and the pinned typescript are both only real pins if the lockfile
+#     is honoured, and both are the reason MD6 says pin them at all.
+#   - `npm test`, the runner package.json names, not a bare `node --test`: a gate
+#     that runs something other than what CI runs proves nothing about CI.
+#   - The test suite regenerates the client twice (once to prove the committed
+#     tree is byte-identical, once to prove a hand-edit is reverted), so this gate
+#     takes a few seconds longer than a normal suite. That cost is the packet.
+set -euo pipefail
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "prime: node is not on PATH. Run 'mise install' first; mise.toml pins it." >&2
+  exit 127
+fi
+
+echo "==> node $(node --version), npm $(npm --version)"
+
+echo "==> npm ci (frozen install, honours package-lock.json exactly)"
+if [ "${1:-}" = "--fast" ]; then
+  echo "    --fast: stopping after the install."
+  exit 0
+fi
+npm ci
+
+echo
+echo "==> npm run typecheck (tsc --noEmit over src/, including the generated tree)"
+npm run typecheck
+
+echo
+echo "==> npm test"
+npm test

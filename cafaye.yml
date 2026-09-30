@@ -1,0 +1,91 @@
+# cafaye.yml — the cafaye project manifest for cafaye-ts.
+#
+# The schema is owned by cafaye/core and is FROZEN:
+# core/schemas/cafaye.manifest.schema.json, `additionalProperties: false`. This
+# file satisfies it as written, and nothing here is a local extension. Where a
+# field is absent it is absent because the schema says a thing like this
+# repository is a thing that does not have it — not because nobody filled it in.
+#
+# Validated against core's schema with (core's schema is JSON Schema draft
+# 2020-12, so it needs Ajv's 2020 build rather than the default one):
+#
+#   node -e "const A=require('ajv/dist/2020'),y=require('js-yaml'),f=require('fs');\
+#     const v=new A({strict:false}).compile(f.readFileSync('<core>/schemas/cafaye.manifest.schema.json','utf8'));\
+#     console.log(v(y.load(f.readFileSync('cafaye.yml','utf8')))||v.errors)"
+#
+# ...and, in CI, by the same `caf contract lint` every service repository runs.
+name: cafaye-ts
+description: The cafaye TypeScript client — types and per-service transport generated from the fleet's committed OpenAPI documents.
+language: typescript
+core: ^0.2.0
+
+# `exposes` is ABSENT, and its absence is the substantive statement in this file.
+#
+# core's manifest schema says to omit `exposes` entirely for libraries, and it
+# has `minProperties: 1` besides: a service that names no contract surface is not
+# declaring a contract it has. cafaye-ts does not serve traffic, does not receive
+# it, and does not publish events. It is a package other things install.
+#
+# This is worth being clear about, because this repository is the one most likely
+# to be misfiled in the other direction. It has six OpenAPI documents' worth of
+# types in it, and it would be easy — and wrong — to reach for `exposes.api:`
+# pointing at `specs/`. That would say this package SERVES an API described by
+# those documents. It serves nothing. The documents are vendored INPUTS, recorded
+# in specs/index.json against the repositories and commits they came from, and
+# the provenance record for an input is not a contract surface.
+#
+# The reason those inputs are recorded at all is MD6: a client generated from a
+# specification nobody can trace is a client built from a rumour. specs/index.json
+# is the trace — repository, path, full 40-character commit sha, and the sha256
+# of the bytes vendored — and it ships inside the npm tarball so a consumer can
+# answer "is this built from the document that describes the service I am
+# running?" offline, about the package they actually installed.
+
+# `consumes` is absent rather than empty. An empty list says "we checked and
+# there are none", which is a claim that has to be revisited; absent says the
+# concept does not apply, and it does not — there is no event bus between a
+# client library and the services it talks to, only HTTP.
+#
+# `dependencies` is absent, and this one is the harder call, so here is the
+# reasoning rather than the conclusion.
+#
+# The field is documented as "other cafaye services this service builds on", with
+# a `required: false` soft-dependency flag for "runs without it, degraded". This
+# package genuinely depends on all six: every one of its service namespaces is
+# generated from that service's document, and removing any of them would produce a
+# smaller and wrong client. So the honest answer looks like six entries with
+# `required: true`.
+#
+# It is still absent, because `required: true` is the part that is untrue. There
+# is no cafaye service for which a consumer of this package can degrade: you do
+# not install cafaye-ts to talk to billing "if it happens to be up", you install
+# it because you are building against cafaye and you use the parts you need. A
+# manifest field whose only available value is a falsehood will be worked around
+# indefinitely — which is the argument MD1 accepted when it added a `cli` kind
+# rather than leaving `caf` to claim `kind: api` for the sake of internal
+# consistency. The build-time relationship to six repositories is real, is
+# recorded in full, and is recorded where it belongs: specs/index.json, one entry
+# per service, with a sha.
+#
+# > DECISION NEEDED (cafaye-ts-01): this manifest says `core: ^0.2.0`, matching
+# > cafaye-rb, on the grounds that it is the range the current fleet is written
+# > against. It is a guess in one specific sense — no cafaye service has tagged a
+# > release, so there is no published core version to derive a range from, and
+# > `^0.2.0` is the platform's initial core range rather than something this
+# > package verified. Cost of being wrong: a service CI that pins core inside
+# > `^0.2.0` will be fine, and one that pins outside it will be the thing that
+# > notices first. Cheap to correct, and the correction is one line plus a
+# > CHANGELOG entry. Related and also open: the npm package name is recorded as
+# > `cafaye-ts` in package.json, and whether this publishes unscoped or under a
+# > `@cafaye/*` scope belongs with whoever owns the npm organisation.
+repository:
+  # SSH only. PLAN.md §1: an HTTPS remote for a cafaye repository is a policy
+  # violation, and every remote named in this repository — this one and the six in
+  # specs/index.json — is a cafaye remote.
+  url: git@github.com:cafaye/cafaye-ts.git
+  defaultBranch: master
+  visibility: public
+
+owner:
+  team: cafaye
+  contact: cafaye@cafaye.com
