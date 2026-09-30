@@ -1,17 +1,28 @@
 # cafaye-ts
 
-**The cafaye TypeScript client. Types and per-service transport, generated from
-the fleet's committed OpenAPI documents.**
+**The cafaye TypeScript client. One class, six services, typed errors.**
 
-This package is the generated half of the cafaye client. It gives you a typed
-function per HTTP operation across all six services, and it gives them to you
-with the specification's own prose attached, so your editor can tell you what an
-endpoint is for without you leaving the code.
+```ts
+import { Cafaye } from 'cafaye-ts';
 
-It has **no runtime dependencies**. It does not decide how you authenticate, what
-base URL you point at, or what a `problem+json` response means — that is the
-hand-written `Cafaye` class, which is not in this package yet. See
-[What this is not](#what-this-is-not).
+const cafaye = new Cafaye({ baseUrl: 'https://cafaye.example.com' });
+const user = await cafaye.identity.getCurrentUser();
+```
+
+That is the whole integration. You name where the fleet is and, if you have one,
+what to authenticate with; the class decides how to send the credential, applies
+a deadline, and turns every failure into an exception you can `catch` by type.
+
+Underneath it are 53 generated operations — a typed function per HTTP operation
+across all six services, each carrying the specification's own prose, so your
+editor can tell you what an endpoint is for without you leaving the code. You do
+not import them. MD6's ruling was that generated code should stay an
+implementation detail, so a generator upgrade can never break your build; this
+is that ruling, in the shape you use.
+
+It has **no runtime dependencies** and **emits no logs, no metrics and no
+telemetry**. See [Credentials](#credentials) for why the second one is a guarantee
+rather than a missing setting.
 
 ## Install
 
@@ -23,60 +34,223 @@ Node 22.19 or newer. Nothing else — there is no `fetch` polyfill to install, n
 HTTP client, and no dependency tree to audit. If you are self-hosting, your
 runtime already has `fetch`.
 
-## Use it
+## Where requests go
 
-Each service has **two** entrypoints, and knowing which is which is the only
-thing about this package that is worth reading twice.
+`baseUrl` is resolved once, in the constructor, and it is resolved for **all six
+services**. In order:
 
-- `cafaye-ts/services/<name>` — the operations and the types
-- `cafaye-ts/services/<name>/client` — `createClient`, the factory that makes
-  the client those operations take
-
-```ts
-import { createClient } from 'cafaye-ts/services/identity/client';
-import { getCurrentUser } from 'cafaye-ts/services/identity';
-
-const client = createClient({ baseUrl: 'https://identity.example.com' });
-
-// Every operation returns a result envelope, not a bare value.
-const { data, error } = await getCurrentUser({ client });
-//   data:  User | undefined
-//   error: Problem | undefined   — identity's RFC 9457 problem document
-```
-
-Pass `throwOnError: true` and the call throws instead of returning `error`, which
-narrows `data` to a non-optional `User`:
+| # | Source | Example |
+|---|---|---|
+| 1 | `baseUrl` as a record, the entry for that service | `{ baseUrl: { identity: '…' } }` |
+| 2 | `baseUrl` as a string, for all six | `{ baseUrl: 'https://cafaye.example.com' }` |
+| 3 | `CAFAYE_<SERVICE>_BASE_URL` | `CAFAYE_IDENTITY_BASE_URL` |
+| 4 | `CAFAYE_BASE_URL` | one origin for all six |
+| 5 | the host's own origin, `globalThis.location.origin` | a browser on the same origin |
+| 6 | **throws** | nothing configured |
 
 ```ts
-const { data } = await getCurrentUser({ client, throwOnError: true });
-//   data: User
+import { Cafaye } from 'cafaye-ts';
+
+// One origin, behind your own reverse proxy. Simplest, and what most self-hosters want.
+const one = new Cafaye({ baseUrl: 'https://cafaye.example.com' });
+
+// Six hosts, named. A per-service entry beats the string.
+const six = new Cafaye({
+  baseUrl: {
+    identity: 'https://identity.cafaye.example.com',
+    billing: 'https://billing.cafaye.example.com',
+    courier: 'https://courier.cafaye.example.com',
+    darkroom: 'https://darkroom.cafaye.example.com',
+    muse: 'https://muse.cafaye.example.com',
+    pantry: 'https://pantry.cafaye.example.com',
+  },
+});
+
+// In a browser application served from the same origin as the fleet, the host's
+// own origin is the last source before the throw.
+const browserApp = new Cafaye();
 ```
 
-Checking `error` by hand works, and it is not what you want to write. The failure
-shapes are RFC 9457 problem documents, and turning one into a typed exception is
-the hand-written `Cafaye` class's job. Until that exists you are doing it
-yourself, and the README would rather say so than let you discover it.
+**There is no default, and no loopback fallback.** A client that guesses where to
+send a customer's credentials is the failure this class exists to prevent, so step
+six throws a `CafayeConfigurationError` that names every source it consulted and
+suggests no host. A missing service in a partial record is reported at
+construction rather than on the fifth call, naming the service.
 
-Or through the top-level entrypoint, which gives you all six services as
-namespaces:
+A value that is not an absolute `http(s)` URL is refused: the generated transport
+concatenates a base URL with a path rather than resolving one against the other,
+so a bare host would produce something that is not a URL.
+
+## Credentials
+
+Hand the class whatever you were given. It works out which kind it is from the
+shape, and sends it accordingly — you do not choose at each call site.
 
 ```ts
-import { identity } from 'cafaye-ts';
-import { createClient } from 'cafaye-ts/services/identity/client';
+import { Cafaye } from 'cafaye-ts';
 
-const client = createClient({ baseUrl: 'https://identity.example.com' });
-const { data } = await identity.getCurrentUser({ client });
+const baseUrl = 'https://cafaye.example.com';
+const apiKey = 'cafaye_key';        // POST /v1/accounts/{account_id}/api_keys
+const sessionToken = 'session';     // POST /v1/session
+const jwt = 'a.b.c';                // the OIDC provider's token endpoint
+
+// A scoped API token: `cafaye_` plus 32 bytes. The bearer header, and nothing else.
+const machine = new Cafaye({ baseUrl, credentials: { token: apiKey } });
+
+// A session token. The bearer header AND the `__Host-session` cookie, because
+// identity accepts either and says it prefers the header when both are present.
+const browser = new Cafaye({ baseUrl, credentials: { token: sessionToken } });
+
+// A bearer JWT. The bearer header, and no cookie.
+const service = new Cafaye({ baseUrl, credentials: { token: jwt } });
+
+// No credential at all. Registering and signing in happen before there is one.
+const anonymous = new Cafaye({ baseUrl });
 ```
 
-**There is deliberately no pre-built client to grab.** The generated code does
-export a `client` const pre-pointed at each service's documented production URL,
-and it is not reachable from any of these entrypoints on purpose: a self-hoster
-who reached for it would send their traffic to the public SaaS. Always construct
-your own, with your own `baseUrl`.
+`cafaye_` is the discriminator, and it is **identity's** discriminator —
+`internal/httpapi/apikeys.go` calls it exactly that, and explains that the prefix
+decides which of two tables is consulted without a query. This package reads the
+same prefix for the same reason. Anything that is not a `cafaye_` token and is not
+a JWS is a session token.
 
-Both routes reach the same generated code. The subpaths are the more stable of
-the two, because the generator's internal file layout is only visible through
-them.
+A credential can be replaced on a live client, which is what a long-running
+process needs:
+
+```ts
+import { Cafaye } from 'cafaye-ts';
+
+const cafaye = new Cafaye({ baseUrl: 'https://cafaye.example.com' });
+
+cafaye.setCredentials({ token: 'cafaye_key' });
+cafaye.setCredentials(null);
+cafaye.credentialKind; // 'apiToken' | 'jwt' | 'session' | null
+```
+
+**Nothing is logged, ever.** Not at debug level, not behind an option, not to a
+telemetry endpoint. This package is the one place in your application that touches
+every credential it has, and `error.message` — which reaches a log file, a crash
+reporter, a support ticket and a screen you are looking over someone's shoulder,
+with no configuration — is the most likely thing in a Node process to carry one.
+Emitting nothing is the only way to guarantee that for a library, because a debug
+log is a log level somebody disables in production and pastes into a bug report.
+
+Every string this package builds out of a service response, a header, a platform
+error or a value you supplied goes through a redactor first, and the redactor is
+**all or nothing**: a string comes back whole or comes back as
+`[redacted: a credential-shaped value was present]`. A scrubber that removes what
+it recognises and returns the rest invites a reader to add one more pattern, and
+the day that pattern has a gap is the day a credential ships.
+`test/wrapper-credential-leak.test.mjs` proves it, against a service that
+deliberately echoes your token back at you.
+
+## Errors
+
+Every non-2xx from every cafaye service is `application/problem+json`
+(RFC 9457). This class turns one into a typed exception.
+
+```ts
+import { Cafaye, CafayeUnauthenticatedError, CafayeValidationError, isCafayeError } from 'cafaye-ts';
+
+const cafaye = new Cafaye({ baseUrl: 'https://cafaye.example.com' });
+const email = 'someone@example.com';
+const password = 'at least eight characters';
+
+try {
+  await cafaye.identity.registerUser({ body: { email, password } });
+} catch (error) {
+  if (error instanceof CafayeValidationError) {
+    // core documents `errors[]` on a 422 and nowhere else
+    for (const field of error.errors) console.error(`${field.field}: ${field.code}`);
+  } else if (error instanceof CafayeUnauthenticatedError) {
+    console.error('sign in again');
+  } else if (isCafayeError(error)) {
+    // every failure, including ones with no class of their own
+    console.error(error.kind, error.status, error.code, error.traceId);
+  } else {
+    throw error;
+  }
+}
+```
+
+```
+CafayeError                        kind: 'problem' | 'protocol' | 'network' | 'configuration'
+├── CafayeProblemError             a problem document arrived
+│   ├── CafayeUnauthenticatedError      401 unauthorized
+│   ├── CafayeForbiddenError            403 forbidden
+│   ├── CafayeNotFoundError             404 not_found
+│   ├── CafayeRateLimitedError          429 rate_limited
+│   ├── CafayeConflictError             409 conflict
+│   │   └── CafayeIdempotencyKeyReusedError    409 idempotency_key_reused
+│   └── CafayeValidationError           422 validation_failed
+├── CafayeProtocolError            an HTTP response that is not what the contract says
+├── CafayeNetworkError             no HTTP response at all
+│   └── CafayeTimeoutError          the network failure was a timeout
+└── CafayeConfigurationError       the options were wrong; no request was made
+```
+
+`CafayeProblemError` is instantiable, and it is the **fallback**. A code nobody
+has heard of produces a `CafayeProblemError` carrying that code, not a bare
+`Error` — a client that throws a bare `Error` on an unrecognised problem type has
+moved the problem, not solved it. `code` chooses the class and `status` breaks
+the tie, because core calls `type` the machine-readable contract and RFC 9457
+makes `status` advisory.
+
+`isCafayeError` recognises an error from a **second copy** of this package, which
+`instanceof` does not: two versions in one dependency tree give two constructors
+and the failure looks like a bug in your error handling.
+
+### The three decisions worth knowing
+
+**A response that is not a problem is not a problem.** A 502 from a reverse proxy
+is a failure, and it is a `CafayeProtocolError`: a status, a `Content-Type`, and a
+short redacted excerpt of the body, because a proxy's HTML is undiagnosable
+without one. It has no cafaye `code`, because inventing one would be a lie.
+
+**A problem-shaped body with a 200 is not a success.** It throws a
+`CafayeProtocolError`. The alternative is handing you a `Problem` where the types
+promised a `User` — a `TypeError` three frames from the mistake, instead of a
+diagnosis at it. Nothing in the six documents' success schemas has `type`,
+`title` and `status` together, so the check has no false positive against the
+current fleet.
+
+**A network failure is not an HTTP error and has no status.** One type covers both
+cases, with the distinction queryable: `kind` is `'problem' | 'protocol' |
+'network' | 'configuration'`, and `status` is `null` for everything that did not
+come with an HTTP response. So the common handler is `error.status !== null`
+rather than an `instanceof` ladder — and a caller who does care can still branch
+on `instanceof CafayeNetworkError`.
+
+**A timeout is not a DNS failure.** `CafayeTimeoutError` extends
+`CafayeNetworkError`, so `catch (e) { if (e instanceof CafayeNetworkError) … }`
+catches both, and `reason` tells them apart:
+
+```ts
+import { CafayeNetworkError, CafayeTimeoutError } from 'cafaye-ts';
+
+function describe(error: CafayeNetworkError): string {
+  // 'timeout' | 'aborted' | 'dns' | 'connection' | 'tls' | 'unknown'
+  if (error instanceof CafayeTimeoutError) return 'the deadline passed';
+  return error.reason;
+}
+```
+
+`aborted` is the caller's own `AbortSignal` firing, which is not a failure of
+anything and must not be retried by a wrapper that does not know whose signal it
+was. `unknown` means this package could not tell — most often a custom `fetch` of
+your own, or `timeoutMs: 0` with a custom abort reason.
+
+## Timeouts
+
+One request may take `timeoutMs`, thirty seconds by default. `0` disables it. The
+deadline is installed per request with an unref'd timer, so it cannot hold a Node
+process open, and it is cleared when the request finishes.
+
+```ts
+import { Cafaye } from 'cafaye-ts';
+
+const cafaye = new Cafaye({ baseUrl: 'https://cafaye.example.com', timeoutMs: 5_000 });
+```
 
 ## What is in the box
 
@@ -94,12 +268,48 @@ All six documents are OpenAPI 3.1. The counts are measured from the documents
 themselves and asserted by the test suite; if a service's document changes size,
 this table and the suite change together or the suite fails.
 
-For every operation you get a function and a family of types:
+`cafaye.<service>.<operation>` returns the operation's **data**, not the generated
+envelope, and a failure is a thrown exception. Underneath, each service also still
+exports a factory and its own types:
 
-- `<operation>Data` — the request
-- `<operation>Response` / `<operation>Responses` — the success shape, and every
-  documented status code as a discriminated union
-- `<operation>Error` / `<operation>Errors` — the documented failure shapes
+```ts
+import { createClient } from 'cafaye-ts/services/identity/client';
+import { getCurrentUser, type Problem } from 'cafaye-ts/services/identity';
+
+const client = createClient({ baseUrl: 'https://identity.example.com' });
+const { data, error } = await getCurrentUser({ client });
+//   data:  User | undefined
+//   error: Problem | undefined   — identity's RFC 9457 problem document
+```
+
+That is the raw transport, and it is the alternative rather than the front door:
+the envelope is a second thing to destructure at every call site, `error` is a
+bare object rather than an `Error` and carries no stack, and `throwOnError: true`
+throws whichever of the two `JSON.parse` produced. Reach for it when you want
+that; the wrapper exists so you do not have to.
+
+**There is deliberately no pre-built client to grab.** The generated code does
+export a `client` const pre-pointed at each service's documented production URL,
+and it is not reachable from any of these entrypoints on purpose: a self-hoster
+who reached for it would send their traffic to the public SaaS. `Cafaye` throws
+rather than fall back to it.
+
+### One escape hatch
+
+`cafaye.rawClient('courier')` returns a service's own generated client, with this
+class's base URL and credential already on it, for a route the documents do not
+describe:
+
+```ts
+import { Cafaye } from 'cafaye-ts';
+
+const cafaye = new Cafaye({ baseUrl: 'https://cafaye.example.com' });
+const courier = cafaye.rawClient('courier');
+```
+
+The name says what it costs: **errors from `rawClient` are not typed.** You get
+the generated envelope. The bound namespaces are the front door; this is a door
+for the routes the documents have not caught up with.
 
 ## Provenance: where this came from
 
@@ -127,30 +337,32 @@ A vendored document with no sha is a rumour. That is the whole reason the index
 exists, and it is why the test suite refuses to pass if a vendored file's bytes
 stop matching what the index says.
 
-**Your copy of `identity` is behind.** A change to identity's OpenAPI document
-was in flight when this package was built, and the vendored copy will be behind
-the moment it lands. That is expected: this package is rebuilt from the
-documents deliberately, by a human, in a reviewable diff — not continuously. If
-you need identity's newest routes, check the `commit` above against your
-deployed identity and wait for the next release, or build from source.
+**Your copy of `identity` is behind.** A change to identity's OpenAPI document was
+in flight when this package was built, and the vendored copy will be behind the
+moment it lands. That is expected: this package is rebuilt from the documents
+deliberately, by a human, in a reviewable diff — not continuously. If you need
+identity's newest routes, check the `commit` above against your deployed identity
+and wait for the next release, or build from source.
 
-## What this is not
+## What this is deliberately not
 
-**There is no `Cafaye` class in this package yet.** The fleet has two different
-authentication models — `identity` issues an opaque server-side session token,
-and everything else uses a JWKS-verified bearer JWT — plus base-URL resolution
-for self-hosting and RFC 9457 problem-to-exception mapping. A generated client
-cannot hide that, so a hand-written one owns it. It is the next packet, and it
-wraps what is here.
+**Nothing here composes two services.** No convenience method that registers a
+user and then creates their account, no pagination helper, no token refresh, no
+retry, no cache. Each of those is a place to put a policy the platform should own,
+and putting one in the client would make the fleet's current shape a thing your
+application code depends on. MD6 named four responsibilities for the hand-written
+client, and this class has those four.
 
-Until then, you construct a client yourself and you handle errors as whatever
-the generated types say they are. If you were hoping for
-`new Cafaye({ baseUrl, token })`, that is coming and it is not here yet.
+**No telemetry, and none planned.** If you want traces, instrument the `fetch` you
+pass in. That is what the `fetch` option is for, and it keeps the decision yours
+rather than making it for you inside a library that touches every credential you
+have.
 
-**This is also not a wrapper you should build on.** `src/services/**` is
-generated code, it carries a `DO NOT EDIT` header, and regeneration reverts
-anything written into it. The top-level entrypoint is the surface, and it is
-deliberately thin.
+**Not a validator of service responses.** The generated types come from the
+documents; a service that drifts from its own document produces a wrong value
+shaped like a right one, and fixing that here would mean a runtime schema library
+and a dependency tree — which MD6 rules out and which
+`test/no-runtime-dependencies.test.mjs` enforces.
 
 ## Regenerating
 
@@ -180,14 +392,14 @@ and both pins exist because of a reproduced failure rather than a caution.
 - **`@hey-api/openapi-ts` is pinned exactly, with no caret.** A caret range on a
   code generator is a public API change waiting for a patch release. MD6 cites
   what that costs: Stainless, a commercial generator whose owner announced a
-  wind-down on 2026-05-18 and left every consumer holding a version range that
-  no longer meant anything.
+  wind-down on 2026-05-18 and left every consumer holding a version range that no
+  longer meant anything.
 - **`typescript` is pinned to 5.9.3, also exactly.** TypeScript 7 removed a
   compiler API the generator's transformers use. The generator declares
-  `peerDependencies: { typescript: ">=5.5.3 || >=6.0.0" }`, and TypeScript
-  7.0.2 — npm's current `latest` — *satisfies that range*. With it installed the
-  generator does not warn and does not degrade; it crashes before reading a
-  document. The declared peer range does not protect you. Only the pin does, and
+  `peerDependencies: { typescript: ">=5.5.3 || >=6.0.0" }`, and TypeScript 7.0.2 —
+  npm's current `latest` — *satisfies that range*. With it installed the generator
+  does not warn and does not degrade; it crashes before reading a document. The
+  declared peer range does not protect you. Only the pin does, and
   `test/no-runtime-dependencies.test.mjs` is its tripwire.
 
 ## License

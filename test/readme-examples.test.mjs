@@ -148,11 +148,18 @@ describe('the README documents things that work', () => {
       assert.ok(existsSync(target), `${specifier} maps to ${target}, which does not exist`);
 
       const module_ = await import(target);
-      // A type-only import is erased at runtime and cannot be checked this way.
-      // Names starting with a capital are therefore skipped, and the types the
-      // README names are checked by `npm run typecheck` instead — which compiles
-      // the generated declarations, and is the only thing that can check a type.
-      const runtimeNames = names.filter((n) => /^[a-z]/.test(n));
+      // A name is checkable at runtime when it is a value, and the two ways a
+      // README writes one are a lower-case name (a function or constant) and a
+      // class — `Cafaye`, `CafayeValidationError`. A class has an upper-case
+      // first letter, so the original "skip anything capitalised as a type"
+      // heuristic skipped exactly the thing this packet added, and reported that
+      // the quickstart's only import had nothing to verify. A name that is neither
+      // — capitalised and not exported at runtime — is assumed to be a type and is
+      // left to the compile check below, which is where a misspelled name is
+      // actually caught.
+      const runtimeNames = names.filter(
+        (n) => /^[a-z]/.test(n) || typeof module_[n] === 'function',
+      );
       assert.ok(
         runtimeNames.length > 0,
         `the README's import from ${JSON.stringify(specifier)} names no runtime value, so ` +
@@ -249,7 +256,6 @@ describe('the README documents things that work', () => {
     // block's scope. What is being checked is that the expressions type-check
     // against the real generated types, and a block scope checks that exactly as
     // well as top level does.
-    const imports = new Set();
     const bodies = [];
     /** Names declared by the scope currently open, so continuations can be spotted. */
     let openScopeNames = new Set();
@@ -262,21 +268,101 @@ describe('the README documents things that work', () => {
     const referenced = (text) =>
       new Set([...text.matchAll(/\b([A-Za-z_$][\w$]*)\b/g)].map((m) => m[1]));
 
-    for (const block of blocks) {
-      const body = [];
-      for (const line of block.split('\n')) {
-        if (/^\s*import\s/.test(line)) imports.add(line.trim());
-        else if (/^\s*export\s/.test(line)) {
+    /**
+     * Split a block into its import statements and its body.
+     *
+     * A MULTI-LINE import is the reason this is a function and not a one-liner.
+     * The original matched `/^\s*import\s/` per line and hoisted only that line,
+     * so
+     *
+     *     import {
+     *       CafayeValidationError,
+     *       isCafayeError,
+     *     } from 'cafaye-ts';
+     *
+     * had its first line hoisted and its remaining three left in the body as bare
+     * identifiers — and the probe failed to PARSE, with four errors that all said
+     * "Identifier expected" and none that said what was wrong. A multi-line import is
+     * not an exotic thing for a README to contain; it is what a formatter produces
+     * for a long import list, which is exactly what the error-handling example has.
+     */
+    const splitImports = (block) => {
+      const lines = block.split('\n');
+      const importLines = [];
+      const bodyLines = [];
+      for (let i = 0; i < lines.length; i += 1) {
+        const line = lines[i];
+        if (/^\s*import\s/.test(line)) {
+          let statement = line;
+          // A named import list may span lines; keep consuming until the `from`
+          // clause closes it. Bounded by the end of the block, so a stray `import`
+          // keyword in an example cannot swallow the rest of the file.
+          while (!/\bfrom\b/.test(statement) && i + 1 < lines.length) {
+            i += 1;
+            statement += `\n${lines[i]}`;
+          }
+          importLines.push(statement);
+        } else if (/^\s*export\s/.test(line)) {
           assert.fail(
             `the README has an \`export\` in a TypeScript example: ${line.trim()}. ` +
-              `A reader copying an example that exports would be copying something ` +
-              `that does not belong in an application.`,
+              'A reader copying an example that exports would be copying something ' +
+              'that does not belong in an application.',
           );
-        } else body.push(line);
+        } else {
+          bodyLines.push(line);
+        }
       }
-      const text = body.join('\n');
-      const declares = declaredBy(text);
-      const uses = referenced(text);
+      return { statements: importLines, bodyLines };
+    };
+
+      // Hoisted imports, deduplicated by BINDING rather than by text.
+    //
+    // A `Set` of trimmed lines is not enough once the README imports the same
+    // name twice — and it does, because each example is written to be readable on
+    // its own and a reader is meant to be able to start at any of them. Two
+    // examples both saying `import { Cafaye } from 'cafaye-ts';` produce two
+    // identical lines, which a Set collapses, and one example saying
+    // `import { Cafaye, CafayeValidationError, isCafayeError } from 'cafaye-ts';`
+    // produces a line that overlaps the first, which a Set does not. Either way
+    // the probe fails with `TS2300: Duplicate identifier 'Cafaye'`, which is a
+    // property of the test's hoisting rather than of anything a reader would hit.
+    //
+    // So each hoisted line is reduced to the names it binds that are not already
+    // bound from the same module, and dropped when that leaves nothing.
+    const importLines = [];
+  const boundNames = new Map();
+
+  const hoist = (statement) => {
+    const match = statement.match(
+      /import\s+(type\s+)?\{([\s\S]*?)\}\s*from\s*['"]([^'"]+)['"]/,
+    );
+    if (match === null) {
+      // A bare `import 'x'` or a default import. Nothing in this README has one,
+      // and passing it through is better than dropping it silently.
+      importLines.push(statement);
+      return;
+    }
+    const [, typeOnly, rawNames, module_] = match;
+    const names = rawNames
+      .split(',')
+      .map((n) => n.trim().replace(/\s+/g, ' '))
+      .filter(Boolean);
+    const already = boundNames.get(module_) ?? new Set();
+    const fresh = names.filter((n) => !already.has(n));
+    for (const name of fresh) already.add(name);
+    boundNames.set(module_, already);
+    if (fresh.length === 0) return;
+    importLines.push(
+      `import ${typeOnly ?? ''}{ ${fresh.join(', ')} } from '${module_}';`,
+    );
+  };
+
+  for (const block of blocks) {
+    const { statements, bodyLines } = splitImports(block);
+    for (const statement of statements) hoist(statement);
+    const text = bodyLines.join('\n');
+    const declares = declaredBy(text);
+    const uses = referenced(text);
 
       // A continuation names something an open scope declared and does not
       // redeclare itself. Everything else gets its own scope, so the two
@@ -293,17 +379,22 @@ describe('the README documents things that work', () => {
       }
     }
 
-    assert.ok(imports.size > 0, "the README's TypeScript examples contain no imports");
+    assert.ok(importLines.length > 0, "the README's TypeScript examples contain no imports");
 
     const source = [
       '// Generated by test/readme-examples.test.mjs. Not committed; deleted in a finally.',
-      ...[...imports],
-      "import type { Problem, User } from 'cafaye-ts/services/identity';",
+      ...importLines,
+      // The types the README's own prose promises a consumer can reach, injected
+      // and ALIASED: cafaye-ts-01's README imported `Problem` and this one does
+      // too, and an unaliased duplicate is `TS2300: Duplicate identifier`. They
+      // are named so a compiler configured with noUnusedLocals does not reject the
+      // file for an unrelated reason, and because the type-only imports are the
+      // half a runtime import cannot check.
+      "import type { Problem as __ReadmeProblem, User as __ReadmeUser } from 'cafaye-ts/services/identity';",
+      "import type { Cafaye as __ReadmeCafaye } from 'cafaye-ts';",
       ...bodies,
       '',
-      // Named so the type-only import is used, and so a compiler configured with
-      // noUnusedLocals does not reject the file for an unrelated reason.
-      'export type __ReadmeTypes = [Problem, User];',
+      'export type __ReadmeTypes = [__ReadmeProblem, __ReadmeUser, __ReadmeCafaye];',
       '',
     ].join('\n');
 
@@ -337,15 +428,68 @@ describe('the README documents things that work', () => {
     }
   });
 
-  it('states plainly that the hand-written client is not here yet', () => {
-    // A README that oversells the package is a defect, not a style choice, and
-    // the overselling here would be a reader looking for `new Cafaye(...)` and
-    // not finding it. The brief for this packet is explicit that the wrapper is
-    // somebody else's work.
+  it('documents the wrapper as the front door, and the generated transport as the alternative', () => {
+    // This test used to assert the opposite, and the assertion was the correct
+    // statement of the world at the time: cafaye-ts-01 shipped the generated half
+    // only, and a README that oversold the package is a defect rather than a style
+    // choice. Packet cafaye-ts-02 landed `Cafaye`, so the claim is now that the
+    // front door exists and that the two entrypoints are not confused — which is
+    // the mistake a reader can actually make now, because both are exported from
+    // the same package.
     assert.match(
       readme,
+      /new Cafaye\(\{ baseUrl/,
+      'the README must show the wrapper being constructed. A self-hoster reading this package ' +
+        'is looking for `new Cafaye(...)` first, and not finding it is a support ticket.',
+    );
+    assert.match(
+      readme,
+      /import \{ Cafaye \} from 'cafaye-ts'/,
+      'the README must show the import a consumer writes, resolving through the package name.',
+    );
+    assert.match(
+      readme,
+      /rawClient/,
+      'the README must name the escape hatch, because an undocumented one is a trap: it hands ' +
+        'back the untyped generated envelope and a reader who finds it by accident will not know ' +
+        'that.',
+    );
+    assert.doesNotMatch(
+      readme,
       /There is no `Cafaye` class in this package yet/,
-      'the README must say the hand-written client is not here, so nobody integrates against it',
+      'the README still says the wrapper is absent. It is not.',
+    );
+  });
+
+  it('documents the base-URL precedence, and never suggests a default', () => {
+    // The README's table is a claim about behaviour, and the one claim that must
+    // not rot is the last row. The scan is over the TABLE rather than the section,
+    // because the prose under it says the opposite thing — "there is no default,
+    // and no loopback fallback" — and a reader who finds that reassuring sentence
+    // is being reassured, not misled. A table row offering one would mislead.
+    for (const source of ['CAFAYE_BASE_URL', 'globalThis.location.origin', '**throws**']) {
+      assert.ok(readme.includes(source), `the README does not document ${JSON.stringify(source)}`);
+    }
+    const table = readme
+      .slice(readme.indexOf('## Where requests go'), readme.indexOf('## Credentials'))
+      .split('\n')
+      .filter((line) => line.trim().startsWith('|'))
+      .join('\n');
+    assert.ok(table.split('\n').length >= 7, 'the base-URL precedence table is not a table of six rows');
+    assert.doesNotMatch(
+      table,
+      /localhost|127\.0\.0\.1/,
+      'a row of the base-URL table offers a loopback address. Resolution never defaults to one.',
+    );
+  });
+
+  it('documents that nothing is logged, because that is a guarantee and not a setting', () => {
+    assert.match(
+      readme,
+      /emits no logs, no metrics and no telemetry|Nothing is logged, ever/,
+      'the README must state that this package emits nothing. The credential-leak test proves it ' +
+        'and a reader deciding whether to install a client in a regulated environment needs to ' +
+        'know it without reading the suite.',
     );
   });
 });
