@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "moduleDetection": "force",
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "verbatimModuleSyntax": true,
+
+    // exactOptionalPropertyTypes is DELIBERATELY OFF, and that is a finding
+    // rather than an omission. hey-api@0.99.0's emitted fetch client passes an
+    // options object whose optional properties are `T | undefined` into a
+    // parameter typed `T`, which the flag rejects — in all six services, at
+    // client/client.gen.ts, on the `serializedBody` and `headers` arguments. The
+    // generated tree cannot be hand-edited; that is the property this whole
+    // repository exists to keep. So a flag the generated code cannot satisfy
+    // cannot be part of the package's compilation contract. Every other strict
+    // flag stays on. Re-test this on a generator upgrade: if the emitted options
+    // stop carrying `| undefined`, turn the flag back on and delete this comment.
+
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "removeComments": false,
+    "newLine": "lf",
+
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "isolatedModules": true
+  },
+  "include": ["src/**/*.ts", "openapi-ts.config.ts"],
+  "exclude": ["node_modules", "dist"]
+}

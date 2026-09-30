@@ -1,0 +1,49 @@
+{
+  "name": "cafaye-ts",
+  "version": "0.0.0",
+  "description": "The cafaye TypeScript client — types and per-service transport generated from the fleet's committed OpenAPI documents.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./services/*": {
+      "types": "./src/services/*/index.ts",
+      "default": "./src/services/*/index.ts"
+    }
+  },
+  "files": [
+    "src/**/*.ts",
+    "specs/index.json",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "generate": "node scripts/generate.mjs",
+    "vendor": "node scripts/vendor.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/**/*.test.mjs\"",
+    "verify:specs": "node scripts/verify-specs.mjs",
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@hey-api/openapi-ts": "0.99.0",
+    "@types/node": "22.19.0",
+    "js-yaml": "4.3.2",
+    "typescript": "5.9.3"
+  },
+  "//overrides": "js-yaml 4.0.0-4.3.1 carries five high-severity advisories (prototype pollution in `<<` merge keys, quadratic-complexity DoS in merge chains, and a CVE-2026-59870 fix never backported to 4.x). 4.3.2 is the v4 line's fix and is outside the range. The generator's own tree pulls 4.2.0 and `npm audit fix` cannot resolve it — its suggested remedy is to downgrade @hey-api/openapi-ts, which would abandon MD6's pin, and even 0.97.0 is still inside the affected range. Forcing 4.3.2 across the tree keeps the pin and clears the advisories. A minor-version jump inside a parser is a compatible change, and `npm test` proves it: regeneration must stay byte-identical.",
+  "overrides": {
+    "js-yaml": "4.3.2"
+  }
+}

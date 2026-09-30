@@ -1,0 +1,46 @@
+# THE ONE RULE IN THIS FILE, AND IT IS THE OPPOSITE OF THE USUAL ONE.
+#
+# `src/services/` holds GENERATED code, and it is COMMITTED. That is the whole
+# point of this repository: `cafaye-ts` ships a client built from the fleet's
+# OpenAPI documents, and the build a self-hoster runs is a `npm ci` that
+# touches no network but npm. Generation happens on a maintainer's machine, on
+# purpose, and its output is reviewed in a diff like any other change.
+#
+# So do NOT add `src/services/`, `dist/`, or any `*.gen.ts` to this file. A
+# gitignore entry for the generated tree turns "generated from the spec, and
+# committed" into "generated at install time", silently, and the only symptom is
+# that `git diff --exit-code` in test/regeneration.test.mjs starts passing
+# vacuously over a tree it can no longer see. Two tests exist to catch exactly
+# that mistake: `regeneration.test.mjs` proves a hand-edit is reverted, and
+# `generated-is-tracked.test.mjs` asserts the committed files are really tracked
+# by git. A gitignore entry would fail the second one.
+
+# Dependencies. `npm ci` from the committed package-lock.json.
+node_modules/
+
+# Build output. The published entry points are `src/index.ts` and the generated
+# tree; `dist/` is only ever produced by an explicit `npm run build`.
+dist/
+*.tgz
+
+# Hey-api's own crash-report and log artefacts. It writes these next to the
+# project root when something fails mid-generation, and they are the first thing
+# that should be untracked: a crash log committed alongside the tree it failed
+# to generate is a confusing thing to find in a diff.
+*.log
+openapi-ts-crash-*.json
+hey-api-report-*.json
+.logs/
+
+# Editor and OS noise — the same set the sibling repositories carry.
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local environment. There are no secrets in this repository: the client holds
+# no credentials and reads none from disk. These two lines are here because a
+# `.env` that appears in a self-hoster's checkout is their file, not ours.
+.env
+.env.*
+!.env.example

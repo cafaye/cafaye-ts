@@ -1,0 +1,100 @@
+{
+  "about": "Provenance for the OpenAPI documents in this directory. Every entry says which repository the document came from, where in that repository it lives, and the full 40-character commit sha it was copied at. specs/<name>.yaml is a verbatim copy of <repository>:<path> at <commit>. `npm run vendor` re-copies every document from exactly those shas; `npm test` asserts each vendored file's bytes still hash to the sha256 recorded here. In six months the question this file answers is 'is this client built from the document that describes the deployed service, or from one that drifted' — a sha is the only thing that answers it, and a vendored copy without one is a rumour. DO NOT hand-edit a vendored document: edit nothing, run `npm run vendor`, and let the diff show you what moved.",
+  "vendoredAt": "2026-09-30",
+  "vendoredFrom": "local checkouts of the six cafaye repositories; `npm run vendor` reads each document with `git cat-file -p <commit>:<path>`, never from a working tree",
+  "generator": {
+    "name": "@hey-api/openapi-ts",
+    "version": "0.99.0",
+    "why": "MD6's pin. Pinned exactly, with no caret. A caret range on a code generator is a public API change waiting for a patch release, which is the exact lock-in MD6 exists to avoid. `typescript` is pinned to 5.9.3 for the same reason and a sharper one: hey-api's transformers use the TypeScript compiler API that TypeScript 7 removed. See AGENTS.md, 'The two pins that are load-bearing'."
+  },
+  "measuredNote": "`operations` and `paths` are counts of what each document actually declares, produced by parsing it. `expectOperations` is the number measured independently before this packet was built and is checked at vendor time: if a document's operation count moves, vendoring fails rather than silently absorbing a document that changed under the client. A failure here means a document changed size, which is precisely the event this provenance exists to catch.",
+  "services": [
+    {
+      "service": "identity",
+      "repository": "git@github.com:cafaye/identity.git",
+      "path": "openapi/v1.yaml",
+      "spec": "specs/identity.yaml",
+      "commit": "35c2576ede65ad3bc7daf3696fb77c0b0ffa54a3",
+      "expectOperations": 16,
+      "openapi": "3.1.0",
+      "infoVersion": "1.2.0",
+      "paths": 12,
+      "operations": 16,
+      "sha256": "6cf031084ee2c7652f8b727ad3c77d73c94b2f2b01aa751f6ddaaee603ef3616",
+      "bytes": 87920,
+      "note": "The document a packet in flight is about to change: identity-08 adds the scoped API token routes, so this vendored copy goes stale the moment that lands. That is expected and is not a failure of this repository. It is the reason `npm run vendor -- --service identity --bump` is one command rather than a sequence, and the reason regeneration being a clean no-op matters more here than for the other five."
+    },
+    {
+      "service": "billing",
+      "repository": "git@github.com:cafaye/billing.git",
+      "path": "openapi/v1.yaml",
+      "spec": "specs/billing.yaml",
+      "commit": "b6df797b72e2fbfa4d277dd639a4a41e3a5c79ad",
+      "expectOperations": 15,
+      "openapi": "3.1.0",
+      "infoVersion": "1.1.0",
+      "paths": 11,
+      "operations": 15,
+      "sha256": "9c33d2d62de14538f099ed19c53cf1389a163078533e692663ff1331894f99e1",
+      "bytes": 50657
+    },
+    {
+      "service": "muse",
+      "repository": "git@github.com:cafaye/muse.git",
+      "path": "openapi/v1.yaml",
+      "spec": "specs/muse.yaml",
+      "commit": "5056ffa22c33b3ddd502331bd38fe83a392dca2b",
+      "expectOperations": 1,
+      "openapi": "3.1.0",
+      "infoVersion": "1.0.0",
+      "paths": 1,
+      "operations": 1,
+      "sha256": "53768c7b46d3ac57fdc377c4f64a911ebee94d1a6c8e6a16332d04a4e0c528ce",
+      "bytes": 21993,
+      "note": "One operation. A one-operation client is still a client, and keeping the entry here rather than special-casing it is what stops muse from being the service that quietly falls out of the pipeline the first time a loop is written."
+    },
+    {
+      "service": "darkroom",
+      "repository": "git@github.com:cafaye/darkroom.git",
+      "path": "openapi/v1.yaml",
+      "spec": "specs/darkroom.yaml",
+      "commit": "bcaa2fe381b7f5d5047a3de862612fc2f81ad059",
+      "expectOperations": 9,
+      "openapi": "3.1.0",
+      "infoVersion": "1.0.0",
+      "paths": 7,
+      "operations": 9,
+      "sha256": "46c6515ba916de798264cce0ef9953bbdad3aa7b8d5f208cef431a6e8ae4eaaf",
+      "bytes": 32748
+    },
+    {
+      "service": "pantry",
+      "repository": "git@github.com:cafaye/pantry.git",
+      "path": "openapi/v1.yaml",
+      "spec": "specs/pantry.yaml",
+      "commit": "123afca1cd63c99d24347c032026e11feb75d3d8",
+      "expectOperations": 4,
+      "openapi": "3.1.0",
+      "infoVersion": "1.1.0",
+      "paths": 4,
+      "operations": 4,
+      "sha256": "65ba7df50087a050f0fc6d9206238ba589f08149e98caf001ffbee8c7e13a365",
+      "bytes": 20961
+    },
+    {
+      "service": "courier",
+      "repository": "git@github.com:cafaye/courier.git",
+      "path": "openapi.yaml",
+      "spec": "specs/courier.yaml",
+      "commit": "59247b6c65fd86a331a4f4bdcaf180ee1730687f",
+      "expectOperations": 8,
+      "openapi": "3.1.0",
+      "infoVersion": "1.2.0",
+      "paths": 4,
+      "operations": 8,
+      "sha256": "20e65fc7c638b037c8b83800e9fce73f73df0860535374914b3b3f79769a269f",
+      "bytes": 24557,
+      "note": "The path is the repository ROOT, not `openapi/v1.yaml` like the other five. This is the entry a hardcoded path per service would have skipped, and it is the reason the path lives in this index and nowhere else. courier's document was partial by its own header until courier-05 made it describe every route the router serves except `/healthz` and `/readyz`, which run before auth and routing exist and which no customer codes against."
+    }
+  ]
+}
