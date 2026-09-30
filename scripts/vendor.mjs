@@ -112,16 +112,22 @@ async function isDirectory(p) {
  */
 async function resolveWorkspace(index, explicit) {
   const wanted = new Set(index.services.map((s) => s.service));
+  // Deduplicated, and order-preserving: a caller who passes `--workspace` and
+  // also has CAFAYE_WORKSPACE set to the same directory should not see that path
+  // listed twice in an error message, which reads as though two different places
+  // were tried and failed.
   const candidates = [
     ...(explicit ? [explicit] : []),
     process.env.CAFAYE_WORKSPACE,
     path.resolve(REPO_ROOT, '..'),
     path.resolve(REPO_ROOT, '..', '..', 'cafaye'),
-  ].filter(Boolean);
+  ]
+    .filter(Boolean)
+    .map((c) => path.resolve(c))
+    .filter((c, i, all) => all.indexOf(c) === i);
 
   const tried = [];
-  for (const candidate of candidates) {
-    const dir = path.resolve(candidate);
+  for (const dir of candidates) {
     tried.push(dir);
     if (!(await isDirectory(dir))) continue;
     // A directory is usable if it holds a git checkout for at least one service
