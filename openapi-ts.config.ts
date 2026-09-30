@@ -52,6 +52,25 @@ const index = JSON.parse(readFileSync(path.join(ROOT, 'specs', 'index.json'), 'u
  * response. Those two together are MD6's "generated types and per-service
  * transport"; the hand-written wrapper above them is packet 2's job, not this
  * file's.
+ *
+ * `@hey-api/client-fetch` is NOT listed as a plugin, and that is deliberate.
+ *
+ * Adding it with `includeInEntry: true` makes the generated service `index.ts`
+ * re-export the client's module-level `client` const — a shared, mutable
+ * `Client` singleton pre-pointed at the document's first server, which for every
+ * service in the fleet is the public SaaS URL. For a self-hoster that is a
+ * footgun: the obvious first line of a consumer's integration would send their
+ * traffic to `https://identity.cafaye.com`. It also exports state, and no cafaye
+ * repository exports module-level mutable state — the sibling services' rules
+ * say so outright.
+ *
+ * So the client's `createClient` factory is reached at its own subpath,
+ * `cafaye-ts/services/<name>/client`, and a consumer constructs their own. That
+ * is one extra path to know, and it was worth finding out by installing the
+ * packed tarball into a scratch project and importing it rather than by reading
+ * the emitter's output: the first draft of README.md documented an import that
+ * did not exist. `test/readme-examples.test.mjs` now imports every documented
+ * path for real, so the next such change fails a test rather than a reader.
  */
 const PLUGINS = ['@hey-api/typescript', '@hey-api/sdk'] as const;
 

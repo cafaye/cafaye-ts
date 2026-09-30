@@ -25,30 +25,58 @@ runtime already has `fetch`.
 
 ## Use it
 
-Every service is a namespace. Pick the one you want:
+Each service has **two** entrypoints, and knowing which is which is the only
+thing about this package that is worth reading twice.
+
+- `cafaye-ts/services/<name>` — the operations and the types
+- `cafaye-ts/services/<name>/client` — `createClient`, the factory that makes
+  the client those operations take
 
 ```ts
-import { identity, billing } from 'cafaye-ts';
-
-const client = identity.createClient({ baseUrl: 'https://identity.example.com' });
-
-// The prose below is from identity's OpenAPI document, in your editor's hover.
-const user = await identity.getCurrentUser({ client });
-```
-
-Or import one service directly, which is what you want if you are not using the
-top-level entrypoint:
-
-```ts
-import { createClient, getCurrentUser } from 'cafaye-ts/services/identity';
-import type { User } from 'cafaye-ts/services/identity';
+import { createClient } from 'cafaye-ts/services/identity/client';
+import { getCurrentUser } from 'cafaye-ts/services/identity';
 
 const client = createClient({ baseUrl: 'https://identity.example.com' });
-const user: User = await getCurrentUser({ client });
+
+// Every operation returns a result envelope, not a bare value.
+const { data, error } = await getCurrentUser({ client });
+//   data:  User | undefined
+//   error: Problem | undefined   — identity's RFC 9457 problem document
 ```
 
-Both routes reach the same generated code. The subpath is the more stable of the
-two, because the generator's internal file layout is only visible through it.
+Pass `throwOnError: true` and the call throws instead of returning `error`, which
+narrows `data` to a non-optional `User`:
+
+```ts
+const { data } = await getCurrentUser({ client, throwOnError: true });
+//   data: User
+```
+
+Checking `error` by hand works, and it is not what you want to write. The failure
+shapes are RFC 9457 problem documents, and turning one into a typed exception is
+the hand-written `Cafaye` class's job. Until that exists you are doing it
+yourself, and the README would rather say so than let you discover it.
+
+Or through the top-level entrypoint, which gives you all six services as
+namespaces:
+
+```ts
+import { identity } from 'cafaye-ts';
+import { createClient } from 'cafaye-ts/services/identity/client';
+
+const client = createClient({ baseUrl: 'https://identity.example.com' });
+const { data } = await identity.getCurrentUser({ client });
+```
+
+**There is deliberately no pre-built client to grab.** The generated code does
+export a `client` const pre-pointed at each service's documented production URL,
+and it is not reachable from any of these entrypoints on purpose: a self-hoster
+who reached for it would send their traffic to the public SaaS. Always construct
+your own, with your own `baseUrl`.
+
+Both routes reach the same generated code. The subpaths are the more stable of
+the two, because the generator's internal file layout is only visible through
+them.
 
 ## What is in the box
 

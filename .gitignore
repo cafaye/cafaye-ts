@@ -38,6 +38,14 @@ hey-api-report-*.json
 .vscode/
 *.swp
 
+# A scratch file that test/readme-examples.test.mjs writes at the repository
+# root so the README's TypeScript can be compiled against this package's own
+# `exports` map. The test deletes it in a `finally`; this line is the safety net
+# for the case where it does not get to, and it is the only entry in this file
+# that ignores a TypeScript file — which is worth stating plainly, given the rule
+# at the top of this one.
+readme-examples.probe.ts
+
 # Local environment. There are no secrets in this repository: the client holds
 # no credentials and reads none from disk. These two lines are here because a
 # `.env` that appears in a self-hoster's checkout is their file, not ours.

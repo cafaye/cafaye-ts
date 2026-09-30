@@ -39,16 +39,26 @@ const SELF = path.basename(import.meta.filename);
  * `git ls-files`, `git diff`, `git check-ignore`, `git update-index` and
  * `git cat-file` on THIS repository are all fine — they read the local index and
  * the local object store, and the suite depends on them. What is forbidden is
- * anything that contacts a remote, and anything that imports the one module in
+ * anything that CONTACTS a remote, and anything that imports the one module in
  * this repository capable of doing so.
  *
- * The vendor-script pattern matches an IMPORT FORM rather than the bare
- * filename, and that distinction was not theoretical: `package-contents.test.mjs`
- * names `scripts/vendor.mjs` in a comment explaining precisely why it must not
- * ship in the tarball, and the first version of this check failed on that
- * comment. A textual check broad enough to catch that comment is also broad
- * enough to catch the documentation of the rule, and a tripwire that fires on
- * the rule's own explanation is a tripwire people disable.
+ * Two of these rules were narrowed after they fired on something harmless, and
+ * both narrowings are recorded here because the reasoning generalises.
+ *
+ * The vendor-script rule matches an IMPORT FORM rather than the bare filename:
+ * `package-contents.test.mjs` names `scripts/vendor.mjs` in a comment explaining
+ * precisely why it must not ship in the tarball, and the broader version failed
+ * on that comment. A check broad enough to catch the documentation of a rule is
+ * a check that eventually gets disabled.
+ *
+ * The URL rules require a URL to be ADJACENT TO A REQUEST, or to be naming a
+ * document, rather than merely present. `readme-examples.test.mjs` asserts that
+ * `createClient` keeps the `baseUrl` it was handed, and its fixture is the string
+ * `https://identity.example.com` — a base URL, passed to a factory, never
+ * fetched. A URL in a string is inert. A URL handed to `curl`, to `https.get` or
+ * to a download helper is not, and neither is a URL ending in `.yaml` or naming
+ * a schema, because that is "fetch the spec to be sure" in the shape it usually
+ * takes.
  */
 const FORBIDDEN = [
   {
@@ -64,9 +74,18 @@ const FORBIDDEN = [
     why: 'a test that performs an HTTP request cannot run offline',
   },
   {
-    pattern: /['"`]https?:\/\//,
-    what: 'contains an http(s) URL',
-    why: 'a test holding a remote URL is one `npm install` away from depending on it',
+    pattern: /['"`]https?:\/\/\S+['"`][^\n]*\b(curl|wget|download|get|request|axios|undici)\b/,
+    what: 'passes an http(s) URL to something that makes a request',
+    why:
+      'a URL handed to a request helper is a dependency on a remote server; a URL sitting ' +
+      'in a string as a fixture is not',
+  },
+  {
+    pattern: /['"`]https?:\/\/\S+(\.ya?ml|\.json|\/schema[^'"`]*|manifest\.schema)/,
+    what: 'holds a URL naming a specification or a schema',
+    why:
+      'a document fetched over HTTP is exactly the "fetch the spec to be sure" change this ' +
+      'file exists to catch, in the shape it usually takes',
   },
   {
     pattern: /git[^'"\n]*\b(clone|pull|ls-remote)\b/,
