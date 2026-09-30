@@ -9,6 +9,99 @@ commit that caused it and the one line that changes to opt back in.
 
 ## [Unreleased]
 
+### Added
+
+- **`Cafaye` — the hand-written client, and the whole integration is now four
+  lines.** `new Cafaye({ baseUrl })` gives you `cafaye.identity.getCurrentUser()`
+  and its five siblings, and the return value is the operation's **data** rather
+  than the generated `{ data, error }` envelope. MD6 ruled the structure — "a
+  single hand-written `Cafaye` class owns credential handling, base-URL resolution
+  for self-hosting, and RFC 9457 problem-to-exception mapping. Generated code
+  stays an implementation detail, so a generator upgrade can never break the
+  public API" — and this is that class. No new runtime dependency: `atob`,
+  `AbortController`, `setTimeout` and `URL` are all it uses.
+- **Base-URL resolution, in a documented order, with no default.** `baseUrl` as a
+  record, `baseUrl` as a string, `CAFAYE_<SERVICE>_BASE_URL`, `CAFAYE_BASE_URL`,
+  the host's own origin — and then a `CafayeConfigurationError` that names every
+  source it consulted and suggests no host. There is no loopback fallback and no
+  reach for the generated clients' documented SaaS default; a self-hoster's
+  traffic cannot end up somewhere nobody chose. All six are resolved in the
+  constructor, so a partial record is a construction-time error naming the
+  service. The per-service variable name is derived from the service name rather
+  than written out six times.
+- **Credential handling for all three shapes the fleet mints, chosen by the
+  value rather than by the call site.** A `cafaye_`-prefixed scoped API token
+  goes out as `Authorization: Bearer …` and nothing else; a session token goes out
+  as that header **and** as `Cookie: __Host-session=…`, because identity accepts
+  either and states that it prefers the header when both are present; a JWS goes
+  out as the header alone, because core says cookies are for browser sessions and
+  a misclassified JWT would publish a fleet-wide credential onto that surface.
+  The `cafaye_` prefix is identity's own discriminator and this package reads it
+  rather than inventing one. `setCredentials` replaces one on a live client, and
+  a value that could break a header is refused at construction.
+- **RFC 9457 problem-to-exception mapping: a typed hierarchy with a typed
+  fallback.** `CafayeProblemError` and six subclasses for the cases worth
+  catching — unauthenticated, forbidden, not found, rate limited, conflict (with
+  `idempotency_key_reused` as a subclass of it), and validation with its
+  per-field failures — plus `CafayeProtocolError` for a response that is not what
+  the contract says, `CafayeNetworkError` and `CafayeTimeoutError` for anything
+  that produced no response, and `CafayeConfigurationError` for a mistake made
+  before a request existed. An unrecognised problem code produces a
+  `CafayeProblemError` carrying that code, not a bare `Error`.
+  `isCafayeError` also recognises an error from a second copy of this package,
+  which `instanceof` does not.
+- **A deadline per request, thirty seconds by default.** Typed as a
+  `CafayeTimeoutError` with a `reason`, so a timeout is catchable as itself and
+  as a network failure, and is not confusable with a DNS failure or with the
+  caller's own abort. The timer is unref'd, so it cannot hold a Node process open,
+  and is cleared when the request finishes.
+- **One documented escape hatch, `cafaye.rawClient(service)`.** A service's own
+  generated client, with this class's base URL and credential already on it, for a
+  route the documents do not describe. Named so its cost is visible: errors from
+  it are the generated envelope, not typed exceptions.
+- **Seven test files and 119 new assertions, and four defects they found.** The
+  notable one: this class emitted nothing at all, and that is now a tested
+  property rather than an intention — every console method and both streams are
+  captured across all seven code paths, `src/cafaye/` is scanned for a console
+  call or a telemetry call with comments stripped, and a service that
+  deliberately echoes your token back at you is proved unable to get it into an
+  exception's message, stack, `cause` chain, own properties or serialised form.
+
+### Changed
+
+- **`src/index.ts` now exports the wrapper as well as the six namespaces.** The
+  namespaces are still there and are still the raw transport; the README is
+  rewritten around the two, with the wrapper as the front door and the generated
+  client as the alternative, and says why the choice is not arbitrary.
+- **The README's "there is no `Cafaye` class in this package yet" is gone**, and
+  the test that asserted it now asserts the opposite: that the wrapper is
+  documented, that the escape hatch is named, and that the base-URL table offers
+  no loopback address. Three further defects in that test's own machinery were
+  fixed on the way — it could not parse a multi-line import, it skipped every
+  capitalised name as a type (so it skipped `Cafaye`), and it deduplicated
+  hoisted imports by text rather than by binding.
+- **`AGENTS.md` records the rules the hand-written half has**, each with the
+  measurement or the failure that established it: no logging, all-or-nothing
+  redaction, no base-URL default, identity's prefix as the discriminator,
+  unconditional credential attachment (four of six services declare no
+  per-operation `security`, and a client that respected the arrays would send
+  unauthenticated requests to all four), owning the `AbortController` rather than
+  using `AbortSignal.any`, and the three places the six service names are stated
+  with the test that keeps them honest.
+
+### Deliberately not built
+
+- **No convenience method that composes two services**, no pagination helper, no
+  token refresh, no retry, no cache, and no runtime validation of service
+  responses. Each is a place to put a policy the platform should own, and MD6
+  named four responsibilities for this class. A client that validates responses
+  would need a runtime schema library and a dependency tree, which MD6 rules out.
+- **No telemetry, and none planned.** Instrument the `fetch` you pass in.
+- **No re-vendoring of `identity`.** The scoped API token routes landed in
+  `bff6333` and the vendored copy is at `35c2576`, so this client has no typed
+  `createApiKey` even though it reads the credential shape identity mints. The
+  provenance is not this packet's to move.
+
 ## [0.1.0] — 2026-09-30
 
 The first packet in a repository that was an empty scaffold, and it is

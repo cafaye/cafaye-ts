@@ -6,23 +6,20 @@ it, and `moon/DECISIONS.md` **MD6** is the ruling this repository implements.
 
 ## What this repository is
 
-`cafaye-ts` is the **generated half** of the cafaye TypeScript client: types and
-per-service transport for all six services, generated from the fleet's committed
-OpenAPI documents, generated-and-committed, with zero runtime dependencies.
+`cafaye-ts` is the cafaye TypeScript client: **generated types and per-service
+transport for all six services**, plus **one hand-written class** over the top of
+it, with zero runtime dependencies.
 
-It is not the whole client. The hand-written `Cafaye` class that MD6 describes —
-credential handling, base-URL resolution, RFC 9457 error mapping — is packet
-`cafaye-ts-02` and is **not here**. See "What this repository does not own".
-
-The shape follows MD6's structural ruling, and the reason is Backstage's
-pattern for a concrete reason rather than a stylistic one: the fleet's documents
-already contain **two different auth models** — `identity` issues an opaque
-server-side session token, and everything else uses a JWKS-verified bearer JWT.
-A generated client cannot hide that, so a hand-written one owns it. And
-generated code staying an internal detail is what makes a generator upgrade
-unable to break the public API. MD6 cites what the alternative costs: Stainless,
-a commercial generator whose owner announced a wind-down on 2026-05-18 and left
-every consumer holding a version range that no longer meant anything.
+The two halves are separate on purpose. MD6 ruled the structure — "generated
+types and per-service transport, wrapped by one hand-written client … Generated
+code stays an implementation detail, so a generator upgrade can never break the
+public API" — and the reason is concrete rather than stylistic: the fleet's
+documents already contain **two different auth models** — `identity` issues an
+opaque server-side session token, and everything else uses a JWKS-verified bearer
+JWT — plus a third credential shape from identity-08. A generated client cannot
+hide that, so a hand-written one owns it. MD6 cites what the alternative costs:
+Stainless, a commercial generator whose owner announced a wind-down on 2026-05-18
+and left every consumer holding a version range that no longer meant anything.
 
 ## Layout
 
@@ -34,9 +31,15 @@ scripts/lib/specs.mjs  the one implementation of "what a vendored document is" a
 scripts/vendor.mjs     re-vendor, at the recorded shas. One command, all six, atomic
 scripts/generate.mjs   run the generator for every service in the index
 scripts/verify-specs.mjs  check the documents against the index; write nothing
-src/index.ts           the public entrypoint. Six namespaces. Deliberately thin
+src/index.ts           the public entrypoint: Cafaye, the error types, the six namespaces
+src/cafaye/class.ts    THE HAND-WRITTEN CLIENT. Credentials, deadlines, error mapping
+src/cafaye/base-url.ts where requests go, in a documented order, with no default
+src/cafaye/credentials.ts  which credential this is, and where it may be sent
+src/cafaye/errors.ts   the RFC 9457 exception hierarchy
+src/cafaye/redact.ts   the scrubber, and safeCause
+src/cafaye/services.ts the six generated namespaces, imported exactly once
 src/services/<name>/   GENERATED, COMMITTED. 16 files per service, 96 in total
-test/                  five properties, plus the git-tracked assertion
+test/                  five properties, the README's examples, and seven wrapper files
 bin/prime              the gate: npm ci, typecheck, the full test suite
 ```
 
@@ -52,7 +55,9 @@ place to update, so there is no second place to forget.
 regeneration reverts whatever you write into it.
 `test/hand-edit-is-reverted.test.mjs` proves it by making the edit and asserting
 it is undone. If you think a generated file needs changing, the document needs
-changing, and the document belongs to a service repository, not to this one.
+changing, and the document belongs to a service repository, not to this one. The
+answer to "the generated code does not offer what I need" is to **wrap** it from
+`src/cafaye/`, never to edit it.
 
 **The generated tree is committed, and `.gitignore` must never stop it.** This
 is the mistake with the longest fuse in the repository. A `.gitignore` entry for
@@ -122,9 +127,14 @@ audit they have to delegate, and a transitive one is an audit nobody can do.
 The generated transport runs on the platform's `fetch` because
 `@hey-api/client-fetch` makes the generator **copy** the client into the output
 rather than import a package — switching clients in `openapi-ts.config.ts` would
-reintroduce a dependency without touching `package.json`.
+reintroduce a dependency without touching `package.json`. The hand-written half
+adds none either: `atob` and `JSON.parse` classify a JWS, `AbortController` and
+`setTimeout` install a deadline, and `URL` parses a base URL.
 `test/no-runtime-dependencies.test.mjs` walks the module graph with the real
 TypeScript parser and fails on any specifier that is not relative or a builtin.
+**The wrapper is the thing a consumer does not have to configure; a dependency
+tree is a configuration surface**, so adding one is a decision to record here and
+in the report, never a detail of a diff.
 
 **Development tooling belongs in `devDependencies`, and the tarball proves it.**
 `test/package-contents.test.mjs` runs `npm pack --dry-run` and asserts the file
@@ -142,15 +152,6 @@ import. A client a self-hoster installs should not need a transpiler.
 `prepack` runs the build, so a stale `dist/` cannot be published. No source maps:
 they would point at `.ts` files that are not in the tarball.
 
-**`src/index.ts` composes nothing, and that is not an oversight.** It re-exports
-six namespaces and holds no credentials, no base-URL resolution, no error
-mapping, and no method that combines two services. All of that is
-`cafaye-ts-02`'s, and MD6's reason for wanting a hand-written wrapper is
-structural rather than aesthetic. Add nothing here that packet will own. The one
-thing this file does own is namespacing by service, because type names collide
-across documents — `Problem` alone appears in more than one — and a flat
-re-export would make the collision an arbitrary choice.
-
 **Tests are `.mjs` under `node --test`.** No test framework: the house
 precedent is `docs`, and a package whose selling point is zero dependencies
 should not need one to test itself. `--test-concurrency=1` is in `package.json`
@@ -158,21 +159,148 @@ and is load-bearing: `regeneration.test.mjs` and `hand-edit-is-reverted.test.mjs
 both write to `src/services/`, and running them in parallel would make each
 fail for a reason that has nothing to do with the generator.
 
+**Wrapper tests import `dist/`, through `test/lib/dist.mjs`.** `src/` is
+TypeScript and cannot be imported by `node --test`, and `src/` is not what a
+consumer installs. `loadDist()` builds on demand, so any wrapper test file runs
+on its own without depending on `package-contents.test.mjs` having built `dist/`
+first — which was a real fragility in the one test that already assumed it.
+
 **`npm ci`, never `npm install`, in anything automated.** The pins are only real
 pins if the lockfile is honoured, and `npm ci` fails when the lock and
 `package.json` disagree rather than quietly rewriting it. That is how a lockfile
 reaches master having drifted from the manifest it claims to describe.
 
+## Rules for the hand-written half
+
+**Never log. Not at any level, not behind an option, not to a stream.** This
+package is the one place in a consumer's application that touches every credential
+it has, and `error.message` reaches a log file, a crash reporter, a support
+ticket and somebody's screen with no configuration. Emitting nothing is the only
+way to guarantee that for a library: a debug log is a log level somebody disables
+in production and pastes into a bug report.
+`test/wrapper-credential-leak.test.mjs` captures every console method and both
+streams across all seven paths, and separately scans `src/cafaye/` for a console
+call, a stream write or a telemetry call with comments stripped.
+
+**Everything a service, a header, a platform error or a caller supplies goes
+through `createRedactor`, and the redactor is all or nothing.** A string comes
+back whole or comes back as `[redacted: a credential-shaped value was present]`.
+There is no partial redaction, and the reason is that a scrubber which removes
+what it recognises and returns the rest invites a reader to add one more
+pattern — and the day that pattern has a gap is the day a credential ships. A
+partially-scrubbed `cause` is the same mistake one level out, so `safeCause`
+withholds the original platform error **entirely** when there is anything to
+withhold, keeping `name` and `code` because those are enums and are what a
+handler branches on. The errno is also recorded on the error itself, so
+withholding a cause never costs the caller the one thing they needed.
+
+**Resolution of the base URL has no default, and never falls back to a loopback
+address.** `resolveBaseUrl` consults, in order: `baseUrl[service]`, `baseUrl` as
+a string, `CAFAYE_<SERVICE>_BASE_URL`, `CAFAYE_BASE_URL`,
+`globalThis.location.origin` — and then **throws**, naming every source it
+consulted and suggesting no host. The generated clients each carry a documented
+default pointing at the public SaaS, and a loopback default would be the same
+failure in friendlier clothes. `Cafaye` resolves all six in its constructor, so a
+partial `baseUrl` record is a construction-time error naming the service rather
+than a surprise on the fifth call. `CAFAYE_<SERVICE>_BASE_URL` is **derived** from
+the service name by `baseUrlEnvFor`; six string literals would be a second list of
+the six services.
+
+**`cafaye_` is identity's discriminator, and this package reads it rather than
+inventing one.** `internal/httpapi/apikeys.go` states the reason: the api_keys and
+sessions tables are different tables with different lifetimes and different
+revocation stories, and the prefix decides which is consulted without a query.
+Anything that is not a `cafaye_` token and not a JWS is a session token, and a
+session is the **only** shape that travels in a `Cookie` header — core says "No
+cookies for API traffic; browser sessions use … cookies and a CSRF token, and
+those are a *different* surface". A JWT misread as a session would publish a
+fleet-wide credential onto the browser surface, which is why the three-way split
+is not two.
+
+**The credential attaches to every request, unconditionally.** The obvious
+refinement is to attach it only where the document declares a security scheme,
+and it is measurably wrong for this fleet: `grep` over the six vendored documents
+finds per-operation `security` arrays on eleven identity operations and six
+courier ones, and **none** on billing, muse, darkroom or pantry — muse and
+darkroom state theirs globally, which the generator does not copy onto each
+operation, and billing and pantry state `security: []` with a note. A client that
+respected the arrays would send unauthenticated requests to four of six services
+and the failure would be a 401 from a service rather than an error from the
+client. The measurement is written into the test that depends on it.
+
+**The class owns the `AbortController`, not `AbortSignal.any`.** `any` adopts the
+reason from whichever signal fired, so a caller who aborts with an error of their
+own — the documented way to say why they stopped — produces a rejection that
+cannot be classified, because an arbitrary `Error` is indistinguishable from a
+network failure. The caller's side aborts with a sentinel the class recognises and
+the deadline aborts with a `CafayeTimeoutError`, so both arrive already typed.
+The deadline is a `setTimeout` and not `AbortSignal.timeout`, because the
+platform's version uses an internal timer that no test clock can reach — writing
+the test and watching the event loop drain past a pending deadline is what found
+it. `node:test`'s mock timers drive it, so a thirty-second timeout costs no
+thirty seconds. It is **unref'd**, so a pending deadline cannot hold a process
+open, and cleared on completion through a `WeakMap` keyed by the signal.
+
+**A response interceptor must return its first argument.** The generated
+transport assigns the hook's result back over the response
+(`response = await fn(response, request, opts)`), so a hook returning `undefined`
+silently replaces a good response with nothing. That is not hypothetical: the
+first version of the cleanup interceptor did it, and every request in the suite
+failed as `the request failed: [object Object]`.
+
+**`BoundOperation` is load-bearing and subtle; `test/wrapper-types.test.mjs` is
+what keeps it honest.** Inferring a signature from outside erases `ThrowOnError`
+to its **constraint**, not its default, and `boolean extends true ? … : …` then
+distributes into BOTH the throwing and the envelope branch. `DataOf` must
+distribute for the union to collapse, optionality is read with
+`[undefined] extends [O]` (the other direction is also true for a required
+parameter under `noUncheckedIndexedAccess`, which this repository turns on), and
+the `Promise` has to be unwrapped. A runtime test cannot see any of this: a
+signature that returns `any` passes every behavioural assertion there is. The
+probe in `wrapper-types.test.mjs` compiles a file that uses the wrapper as a
+consumer would, through the package name, so it checks the declarations a
+consumer actually installs.
+
+**The six service names are stated three times in the source**, because a static
+import is a static import and a consumer's editor needs real properties to
+complete: in `services.ts` (the imports and the record), in `class.ts` (six typed
+properties) and in `openapi-ts.config.ts` (which derives from
+`specs/index.json`). Three statements of six names is one too many, and the
+mitigation is the one this repository uses everywhere else: a test.
+`test/wrapper-class.test.mjs` asserts that the record's keys, the class's own
+properties and the six services in `specs/index.json` are the same six, so a
+seventh service fails the suite in the place where the omission is rather than
+producing a six-of-seven client that reports success. Same tripwire shape as
+`regeneration.test.mjs` and as courier's document path.
+
+**The wrapper composes nothing.** No convenience method that spans two services,
+no pagination helper, no token refresh, no retry, no cache, no runtime response
+validation. Each is a place to put a policy the platform should own, and putting
+one here would make the fleet's current shape a thing a consumer's application
+depends on. MD6 named four responsibilities — credentials, base URLs, RFC 9457
+mapping, and being the public surface — and this class has those four. The one
+deliberate exception is `rawClient(service)`, an escape hatch for a route the
+documents do not describe, named so its cost is visible: **errors from it are not
+typed**, because it hands back the generated envelope.
+
 ## What a green run does not prove
 
 Stated in the spirit of **MD5**, which is a standing practice and not a comment
-in one file. A green suite here means the vendored bytes match `specs/index.json`
-and the committed tree matches the pinned generator. It says **nothing** about
-whether the recorded shas are still what those repositories are on `master`.
-That is `npm run vendor -- --bump`, and it is a human decision. Re-read the
-index's `commit` column before assuming this client matches what a service is
-actually serving — `identity`'s is behind right now, on purpose, because a packet
-adding scoped API token routes was in flight when this was built.
+in one file. A green suite here means the vendored bytes match `specs/index.json`,
+the committed tree matches the pinned generator, and the wrapper does what its
+tests say. It says **nothing** about whether the recorded shas are still what
+those repositories are on `master`. That is `npm run vendor -- --bump`, and it is
+a human decision. Re-read the index's `commit` column before assuming this client
+matches what a service is actually serving — `identity`'s is behind right now, on
+purpose, and deliberately: the vendored copy is at `35c2576` and the scoped API
+token routes landed in `bff6333`, which is why this client has no typed
+`createApiKey` even though the credential shape it reads (`cafaye_` plus 32 bytes)
+is the one identity mints. Re-vendoring is `cafaye-ts-03`'s decision, not this
+class's, and the brief for this packet forbade touching the provenance.
+
+It also says nothing about whether a **service** honours its own document. The
+generated types come from the documents, so a service that drifts produces a
+wrong value shaped like a right one, and no amount of type checking sees it.
 
 ## Gates
 
@@ -185,7 +313,19 @@ the same thing through mise. The order is install, typecheck, test, and the
 typecheck is not decoration: `node --test` runs the `.mjs` suite and reports
 green while the TypeScript this package ships has an error in it, because the
 suite tests the pipeline and the pipeline does not compile its own output. The
-type check is the only step that looks at all 96 generated files as TypeScript.
+type check is the only step that looks at all 96 generated files — and the whole
+of `src/cafaye/` — as TypeScript.
+
+The current floor is **186 pass, 0 fail, 0 skipped**. cafaye-ts-01's baseline was
+67; do not go below the current number, and do not fix a red test by loosening an
+assertion, raising a retry or adding a sleep.
+
+**No sleeps, no raised retries, no loosened assertions.** The deadline tests use
+`node:test`'s mock timers and an injected `fetch`; the only `await` on a
+macrotask anywhere is `setImmediate`, which is a yield rather than a wait and has
+no interval to be late against. `test/suite-is-offline.test.mjs` is the standing
+reason: a test that performs an HTTP request cannot run offline, and the vendored
+bytes are the artifact.
 
 ## Changing a generated file's contents
 
@@ -203,21 +343,31 @@ that, then:
    the commit is the whole story.
 5. CHANGELOG entry.
 
+A regeneration diff can also change the **public** surface without changing the
+generated files' contents — a new operation appears in a namespace, a type
+changes shape — and `test/package-contents.test.mjs`'s count assertions and the
+README's table are there to catch the drift. Read the README's operation table
+after a bump; it is asserted against `specs/index.json`, not against the
+generator.
+
 ## What this repository does not own
 
-- **The `Cafaye` class.** Credentials, base URLs, RFC 9457 error mapping, and any
-  convenience method that composes services. Packet `cafaye-ts-02`. If it seems
-  obviously necessary here, that is why that packet exists — and adding a piece
-  of it is how the two packets conflict.
+- **The documents themselves.** They belong to `identity`, `billing`, `muse`,
+  `darkroom`, `pantry` and `courier`. This repository holds copies with
+  provenance and never edits them. Re-vendoring `identity` onto `bff6333` is the
+  obvious next packet and is deliberately not this one.
 - **Publishing to npm.** The package is shaped for it and the tarball is
   asserted, but it is not published and the name is provisional; whether this
   publishes unscoped or under `@cafaye/*` belongs with whoever owns the npm
-  organisation. See the `DECISION NEEDED` in `cafaye.yml`.
-- **The documents themselves.** They belong to `identity`, `billing`, `muse`,
-  `darkroom`, `pantry` and `courier`. This repository holds copies with
-  provenance and never edits them.
+  organisation. See the `DECISION NEEDED` in `cafaye.yml`. The `core: ^0.2.0`
+  range there is also still open and is left open.
 - **Registration in pantry.** Not yet done, deliberately, and not this
   repository's to do. The worktree sits outside the `cafaye/` directory and
   pantry's drift test walks that directory in both directions, so this
   repository appearing there turns its gate red for an entirely correct reason.
   Registering it is a separate packet.
+- **The scope claim's canonical name.** MD7 is open: identity mints tokens
+  carrying both `scope` and `scopes` because core cannot yet settle which is
+  canonical. This client does not read either — it forwards the credential
+  without parsing it — so MD7 is invisible here, which is the right outcome and
+  worth noticing: the ambiguity is contained inside the token.
