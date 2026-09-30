@@ -320,6 +320,28 @@ The current floor is **187 pass, 0 fail, 0 skipped**. cafaye-ts-01's baseline wa
 67; do not go below the current number, and do not fix a red test by loosening an
 assertion, raising a retry or adding a sleep.
 
+**`gate.yml` at the root declares that gate, and `minimum: 187` in it is that
+floor as a number a machine reads.** It is written against core's
+`schemas/gate.schema.json` and checked by core's `harness/bin/gate-check`, so
+"what gates this repository", "what the gate needs from the machine" and "what
+the log must say before the word green means anything" are one checked file
+rather than three things to remember. `mise run prime` is the declared command
+and `bin/prime` is the entrypoint; run the static check from a core checkout with
+`harness/bin/gate-check --prove .`.
+
+**Raise `minimum` in the same commit that adds a test.** It is a ratchet, not a
+target: a suite that quietly lost tests cannot report itself as passing, and a
+floor left behind stops protecting anything. Adding a test does not fail the gate
+on its own — that is the deliberate cost of not putting the assertion in the
+suite — so the rule is a human one, and the declaration says so where the next
+reader will find it.
+
+**`mise run gate-self-test` breaks `gate.yml` thirteen ways and asserts core's
+checker catches each.** It is deliberately not part of `prime`: `bin/prime` runs
+`npm test`, so a self-test inside the gate would mean the gate runs the checker
+and the checker runs the gate. It needs a cafaye/core checkout (`CAFAYE_CORE`, or
+it finds `../core`) and exits **2** rather than skipping if there is not one.
+
 **No sleeps, no raised retries, no loosened assertions.** The deadline tests use
 `node:test`'s mock timers and an injected `fetch`; the only `await` on a
 macrotask anywhere is `setImmediate`, which is a yield rather than a wait and has

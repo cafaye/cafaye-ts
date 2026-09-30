@@ -33,6 +33,17 @@ node = "22.19.0"
 description = "The gate: npm ci, typecheck, the full test suite"
 run = "./bin/prime"
 
+[tasks.gate-self-test]
+# Proof that gate.yml cannot be true and stay quiet. Deliberately NOT part of
+# `prime`: bin/prime runs npm test, which globs test/**/*.test.mjs, so a
+# self-test inside the gate would mean the gate runs the checker, the checker
+# runs the gate, and a gate that verifies itself by running itself terminates —
+# and the termination is all it would prove. It needs a cafaye/core checkout;
+# set CAFAYE_CORE, or leave it and it finds ../core. Four of its cases run the
+# gate for real, so it takes a few minutes.
+description = "Break gate.yml thirteen ways and assert core's checker catches each"
+run = "bash test/gate_self_test.sh"
+
 [tasks.generate]
 description = "Regenerate the client for all six services from the vendored documents"
 run = "npm run generate"
