@@ -123,3 +123,48 @@ export function createRedactor(
     return text;
   };
 }
+
+/**
+ * Keep a platform error as a `cause`, unless there is something in it to keep out
+ * of one.
+ *
+ * A `cause` is how the errno survives: undici's `TypeError: fetch failed` says
+ * nothing, and the difference between a refused connection and a certificate that
+ * expired is one level down. So the original object is normally preserved
+ * untouched, and a caller who wants `err.cause.cause.code` has it.
+ *
+ * Except when the redactor finds a credential in it. A `cause` is a real object
+ * this package does not own, and it is reachable — Node's `util.inspect` prints
+ * it, `console.error(err)` prints it, every crash reporter prints it. Passing a
+ * partially-scrubbed copy would be the worst of both: a cause that is no longer
+ * the platform's, carrying a message that is no longer true. So when there is
+ * anything to withhold, the original is withheld ENTIRELY and replaced with a
+ * stand-in that says so, keeping the `name` and the `code` because those are
+ * enums rather than prose and are the part a handler branches on.
+ *
+ * This is the same all-or-nothing rule as `redact` itself, applied one level out:
+ * a scrubber that removes what it recognises and returns the rest invites a
+ * reader to add one more pattern, and the day that pattern has a gap is the day a
+ * credential ships.
+ */
+export function safeCause(error: unknown, redact: (value: unknown) => string): unknown {
+  if (error === null || error === undefined) return error;
+  if (typeof error !== 'object') {
+    return redact(error) === String(error) ? error : new Error(REDACTED);
+  }
+
+  const message = (error as { message?: unknown }).message;
+  if (typeof message === 'string' && redact(message) === message) return error;
+
+  const stand = new Error(
+    `${REDACTED} — the original platform error carried a credential-shaped value, so it is ` +
+      'not attached. Its name and code are kept because those are enums and are what a ' +
+      'handler branches on.',
+  );
+  stand.name = typeof (error as { name?: unknown }).name === 'string' ? (error as Error).name : 'Error';
+  const code = (error as { code?: unknown }).code;
+  if (typeof code === 'string' || typeof code === 'number') {
+    Object.defineProperty(stand, 'code', { value: code, enumerable: false, writable: true });
+  }
+  return stand;
+}

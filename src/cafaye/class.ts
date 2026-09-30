@@ -84,7 +84,7 @@ import {
   problemErrorFrom,
   protocolErrorFrom,
 } from './errors.js';
-import { createRedactor } from './redact.js';
+import { createRedactor, safeCause } from './redact.js';
 import { clientFactories, namespaces, serviceNames, type ServiceClient } from './services.js';
 
 /**
@@ -383,22 +383,19 @@ export class Cafaye {
     const timeoutMs = this.#timeoutMs;
 
     /**
-     * Deadlines waiting to be cleared, keyed by the signal they belong to.
+     * Per-request cleanup, keyed by the signal this class installed.
      *
-     * A `setTimeout` left pending after its request has finished is not a leak —
-     * it is unref'd, and the worst it does is abort a controller nobody reads
-     * again — but "at most one request's worth" is a much easier thing to reason
-     * about than "whatever the request rate happens to be times the timeout". A
-     * process doing a thousand requests a second with a thirty-second timeout
-     * would otherwise hold thirty thousand live timers, and the reason to clear
-     * them is not the count: it is that clearing on completion is the difference
-     * between a deadline being a property of the REQUEST and being a property of
-     * the client's construction.
+     * Two things have to be undone when a request finishes: a pending timer, and
+     * a listener this file put on the caller's `AbortSignal`. Neither grows
+     * without bound — the timer is unref'd, so it cannot hold a process open —
+     * but "at most one request's worth" is a much easier property to reason about
+     * than "whatever the request rate happens to be", and a listener left on a
+     * long-lived `AbortController` that a caller keeps reusing is a real one.
      *
-     * A `WeakMap` rather than a `Map` because a missed clear should cost a
+     * A `WeakMap` rather than a `Map` because a missed cleanup should cost a
      * garbage collection and not a leak: the entry dies with the signal.
      */
-    const deadlines = new WeakMap<AbortSignal, () => void>();
+    const cleanups = new WeakMap<AbortSignal, () => void>();
 
     const config = {
       baseUrl: this.baseUrls[service],
@@ -416,32 +413,66 @@ export class Cafaye {
 
         if (timeoutMs === 0) return;
 
+        /**
+         * One controller, two things that can abort it, and a reason that says
+         * which.
+         *
+         * `AbortSignal.any` was the first version of this and it is subtly wrong
+         * in a way the tests found: `any` adopts the reason from whichever signal
+         * fired, so a caller who aborts with an error of their own — which is the
+         * documented way to say why they stopped — produces a rejection this class
+         * cannot classify, because an arbitrary `Error` is indistinguishable from
+         * a network failure. Owning the controller fixes it: the caller's side
+         * aborts with a sentinel this file recognises and the deadline aborts with
+         * a `CafayeTimeoutError`, so both are already typed by the time the
+         * rejection arrives and neither has to be guessed at afterwards.
+         */
         const controller = new AbortController();
+        const callerSignal = opts.signal ?? undefined;
+        // The caller's abort reason is a value the CALLER chose, and it arrives
+        // here on its way to becoming a `cause` — so it goes through the same
+        // redactor as everything else, at the same time, rather than being trusted
+        // because it came from inside the process.
+        const safe = createRedactor(this.#credential === null ? [] : [this.#credential]);
+
+        const onCallerAbort = () => {
+          controller.abort(
+            new CafayeNetworkError(
+              `${service}: the request was stopped by the caller's own signal, not by this ` +
+                "client's deadline. Nothing about the service is implied by that, and it must " +
+                'not be retried by anything that does not know whose signal it was.',
+              { reason: 'aborted', cause: safeCause(callerSignal?.reason, safe) },
+            ),
+          );
+        };
+
+        if (callerSignal !== undefined) {
+          if (callerSignal.aborted) onCallerAbort();
+          else callerSignal.addEventListener('abort', onCallerAbort, { once: true });
+        }
+
         const timer = setTimeout(() => {
-          // Aborting with an ERROR as the reason, rather than with nothing, is
-          // what keeps a timeout distinguishable from a caller's own abort after
-          // the fact: this class installed the deadline, so this class knows whose
-          // signal fired. The reason travels through undici unchanged, so the
-          // rejection below arrives already typed.
           controller.abort(
             new CafayeTimeoutError(
               `${service}: no response within ${timeoutMs}ms. The request was given up on; ` +
                 'nothing about the service is implied by that, and a timeout is not a DNS ' +
                 'failure — check `reason` before retrying.',
-              { timeoutMs, cause: controller.signal.reason },
+              { timeoutMs, cause: safeCause(callerSignal?.reason, safe) },
             ),
           );
         }, timeoutMs);
         // Unref'd so a pending deadline cannot hold a process open. A library that
-        // keeps a Node process alive for thirty seconds after its last request is
-        // a library that breaks every graceful-shutdown test in the application
-        // using it.
+        // keeps a Node process alive for thirty seconds after its last request is a
+        // library that breaks every graceful-shutdown test in the application using
+        // it.
         timer.unref?.();
 
-        const callerSignal = opts.signal ?? undefined;
-        const composed = callerSignal ? AbortSignal.any([callerSignal, controller.signal]) : controller.signal;
-        deadlines.set(composed, () => clearTimeout(timer));
-        opts.signal = composed;
+        const signal = controller.signal;
+        cleanups.set(signal, () => {
+          clearTimeout(timer);
+          callerSignal?.removeEventListener('abort', onCallerAbort);
+        });
+        opts.signal = signal;
       },
     };
 
@@ -464,17 +495,16 @@ export class Cafaye {
     // for its message.
     //
     // The response hook receives the RESOLVED options, so the signal it reads is
-    // the composed one this file installed. The error hook receives the original
-    // per-call options, whose `signal` is the caller's own — so the deadline is
-    // not cleared on that path. The timer is unref'd and bounded, so leaving it
-    // is a missed optimisation rather than a leak, and reading the wrong signal
-    // to "fix" it would clear a deadline that is still wanted.
+    // the one this file installed. The error hook receives the original per-call
+    // options, whose `signal` is the caller's own — so cleanup does not run on that
+    // path. That is a missed optimisation and not a leak, and reading the wrong
+    // signal to "fix" it would tear down a request that is still wanted.
     const clearOnResponse = (
       response: Response,
       _request: Request,
       opts: { signal?: AbortSignal | undefined },
     ) => {
-      if (opts?.signal !== undefined) deadlines.get(opts.signal)?.();
+      if (opts?.signal !== undefined) cleanups.get(opts.signal)?.();
       return response;
     };
     const clearOnError = (error: unknown) => error;
@@ -586,19 +616,28 @@ export class Cafaye {
     // connection, a certificate, a timeout, or a caller's own abort. The
     // distinction is in `reason`, and it is not collapsed.
     if (response === undefined) {
-      // A deadline this class installed aborts with a `CafayeTimeoutError` as the
-      // signal's own reason, so a timeout arrives already typed and needs no
-      // classification at all. Everything else is classified below.
-      if (error instanceof CafayeTimeoutError) return error;
+      // An error this class constructed is already typed, already redacted and
+      // already carries the right `reason` — it is the abort sentinel or the
+      // deadline's own error, travelling through undici as the signal's reason.
+      // Wrapping it again would replace a `reason: 'aborted'` with whatever
+      // `classifyNetworkFailure` could work out from the outside, and an
+      // arbitrary caller-supplied abort reason is not classifiable at all.
+      if (error instanceof CafayeError) return error;
 
       const { reason, code } = classifyNetworkFailure(error);
+      const safe = createRedactor(secrets);
       const detail = error instanceof Error ? error.message : String(error);
       return new CafayeNetworkError(
-        createRedactor(secrets)(
+        safe(
           `${operation}: ${reason === 'unknown' ? 'the request failed' : `the request failed (${reason})`}` +
             `${code === null ? '' : ` [${code}]`}: ${detail}`,
         ),
-        { reason, code, cause: error },
+        // The cause is kept when it is clean, because it is where the errno is,
+        // and withheld entirely when it is not. A `cause` is an object Node prints
+        // in `console.error(err)` and in every crash reporter, and a partially
+        // scrubbed copy would be a cause that is no longer the platform's carrying
+        // a message that is no longer true.
+        { reason, code, cause: safeCause(error, safe) },
       );
     }
 

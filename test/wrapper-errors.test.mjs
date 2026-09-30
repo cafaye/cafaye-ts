@@ -432,6 +432,20 @@ describe('why a timeout is not a DNS failure', () => {
     assert.equal(classifyNetworkFailure('a string').reason, 'unknown');
   });
 
+  it('cannot classify a custom abort reason, and says so rather than pretending', () => {
+    // A caller who calls `controller.abort()` with no reason gets an
+    // `AbortError` DOMException, which is recognised. A caller who aborts with an
+    // error of their own — the documented way to say why they stopped — produces
+    // something this function has never seen, and with `timeoutMs: 0` the class
+    // composes no signal of its own to replace it. The limitation is stated in
+    // `errors.ts` and asserted here so that it stays stated: `unknown` is
+    // information, and it is the honest information.
+    assert.equal(
+      classifyNetworkFailure(Object.assign(new Error('the user navigated away'), { code: 'ABORT_ERR' })).reason,
+      'unknown',
+    );
+  });
+
   it('finds the platform code wherever Node put it', () => {
     // undici puts it on `cause`, and an error raised directly carries it on
     // itself. Both are read, and both are reported as the string Node uses.

@@ -116,6 +116,23 @@ export type NetworkFailureReason =
   | 'tls'
   | 'unknown';
 
+/**
+ * `'unknown'` is an answer, not a shrug.
+ *
+ * It means this package could not tell what happened, and a caller is better off
+ * knowing that than being told "connection" for something that was not. The
+ * common cause is a custom `fetch` the consumer supplied: the shapes below are the
+ * ones Node produces, and a transport that rejects with an `Error` of its own is
+ * by definition not one of them.
+ *
+ * The second common cause is `timeoutMs: 0`. With the deadline disabled this class
+ * composes no signal of its own and hands the caller's straight to the platform, so
+ * a caller who aborts with a custom reason — rather than with no reason, which
+ * yields the `AbortError` DOMException this function does recognise — produces a
+ * rejection that looks like every other failure. With a deadline in place the class
+ * aborts with its own sentinel instead, and `reason` is `'aborted'` either way.
+ */
+
 /** The five RFC 9457 members, plus the two cafaye extensions core declares. */
 const KNOWN_PROBLEM_MEMBERS: ReadonlySet<string> = new Set([
   'type',
