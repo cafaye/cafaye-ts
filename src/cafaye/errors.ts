@@ -459,6 +459,11 @@ export function classifyNetworkFailure(error: unknown): {
   code: string | null;
 } {
   const named = error as { name?: unknown; code?: unknown; cause?: { code?: unknown } } | null;
+  // Strings only, and the reason is worth stating: the one place a numeric code
+  // appears is a `DOMException`'s legacy `code` — 20 for AbortError, 23 for
+  // TimeoutError — and both of those are already identified by `name` a line
+  // below. Coercing them to strings would put `23` in a field documented as a
+  // platform error code, where it reads like a Node errno.
   const topLevel = typeof named?.code === 'string' ? named.code : null;
   const fromCause = typeof named?.cause?.code === 'string' ? named.cause.code : null;
   const code = topLevel ?? fromCause;
@@ -485,7 +490,13 @@ export function classifyNetworkFailure(error: unknown): {
   ) {
     return { reason: 'connection', code };
   }
-  if (code !== null && /(CERT|SSL|TLS)/.test(code)) return { reason: 'tls', code };
+  // The certificate and handshake faults Node and OpenSSL actually produce.
+  // `UNABLE_TO_VERIFY_LEAF_SIGNATURE` and `EPROTO` are in the list because they
+  // are the two that carry no obvious keyword, and a wrapper that called a
+  // broken certificate chain "connection" would tell a caller to retry it.
+  if (code !== null && /(CERT|LEAF_SIGNATURE|UNABLE_TO_VERIFY|ERR_TLS|ERR_SSL|SSL_|EPROTO)/.test(code)) {
+    return { reason: 'tls', code };
+  }
   return { reason: 'unknown', code };
 }
 
