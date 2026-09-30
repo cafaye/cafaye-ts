@@ -1,0 +1,92 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prime:
+    name: bin/prime (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22.19.0 is the version mise.toml pins and the floor package.json
+        # declares in `engines.node`. It clears
+        # `@hey-api/openapi-ts@0.99.0`'s own `engines.node: ">=22.18.0"`, which
+        # is the constraint that actually decides whether the generator runs.
+        #
+        # 24.x is the current LTS line and runs the same suite. It is here
+        # because the published package declares `>=22.19.0`, and a floor that
+        # is only ever tested at the floor is a floor nobody has checked
+        # anything above.
+        node: ["22.19.0", "24"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: bin/prime
+        run: ./bin/prime
+
+      - name: The vendored documents still match specs/index.json
+        # The one check CI can do that a local run usually does not need: it runs
+        # against a fresh clone of THIS repository, where nothing has been
+        # re-vendored by hand in the working tree. `npm run verify:specs` is
+        # offline by construction — it compares the vendored bytes to the index
+        # and never contacts a remote — so this is safe to run on a public runner
+        # and needs no credential, which is the property MD3 established for the
+        # fleet's other CI.
+        run: npm run verify:specs
+
+      - name: The suite left the generated tree byte-identical
+        # `bin/prime` already ran regeneration.test.mjs, which asserts this
+        # inside the suite. Repeating it here, after the whole gate, is a
+        # different check: it proves the tree is clean in the RUNNER's git
+        # index, which is the only place a stale or ignored generated file
+        # would show up as a passing suite over a tree CI cannot see.
+        #
+        # --exit-code AND --porcelain, because `git diff` is blind to an
+        # untracked file and a generated file that stopped being committed looks
+        # exactly like no change at all.
+        run: |
+          git diff --exit-code -- src/services
+          test -z "$(git status --porcelain -- src/services)" \
+            || { echo "::error::the generated tree is not clean after bin/prime"; \
+                 git status --porcelain -- src/services; exit 1; }
+
+      - name: npm audit is clean
+        # Zero advisories in the devDependency tree, which is where all of them
+        # are: `dependencies` is empty, so none of this reaches a consumer. The
+        # js-yaml override in package.json is what makes this pass while keeping
+        # MD6's exact generator pin; see CHANGELOG 0.1.0, "js-yaml forced to
+        # 4.3.2 by an npm override".
+        run: npm audit --audit-level=high
+
+      - name: The manifest still validates against core's schema
+        # `caf contract lint` is the house tool for this and is what every
+        # sibling repository cites. core's schema is frozen with
+        # `additionalProperties: false`, so a field added to cafaye.yml by
+        # accident is a schema violation rather than a local extension.
+        #
+        # caf is built from source rather than downloaded, so this step cannot
+        # break because a release disappeared from a registry — the same reason
+        # MD3 found the fleet's other CI needs no credential: every cafaye
+        # repository is public.
+        run: |
+          git clone --depth 1 https://github.com/cafaye/caf.git /tmp/caf
+          (cd /tmp/caf && go build -o /tmp/caf-bin ./cmd/caf)
+          /tmp/caf-bin contract lint cafaye.yml

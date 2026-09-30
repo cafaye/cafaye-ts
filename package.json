@@ -7,20 +7,22 @@
   "engines": {
     "node": ">=22.19.0"
   },
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./src/index.ts",
-      "default": "./src/index.ts"
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
     },
     "./services/*": {
-      "types": "./src/services/*/index.ts",
-      "default": "./src/services/*/index.ts"
-    }
+      "types": "./dist/services/*/index.d.ts",
+      "default": "./dist/services/*/index.js"
+    },
+    "./package.json": "./package.json"
   },
   "files": [
-    "src/**/*.ts",
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
     "specs/index.json",
     "README.md",
     "CHANGELOG.md",
@@ -31,9 +33,10 @@
     "generate": "node scripts/generate.mjs",
     "vendor": "node scripts/vendor.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "node --test \"test/**/*.test.mjs\"",
+    "test": "node --test --test-concurrency=1 \"test/**/*.test.mjs\"",
     "verify:specs": "node scripts/verify-specs.mjs",
-    "build": "tsc -p tsconfig.build.json"
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build"
   },
   "dependencies": {},
   "devDependencies": {
