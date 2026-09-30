@@ -95,10 +95,21 @@ future tidy-up that regularises the six trips a test carrying the reason.
   removed a compiler API the generator's transformers use. The generator declares
   `peerDependencies: { typescript: ">=5.5.3 || >=6.0.0" }`, and TypeScript 7.0.2
   — npm's `latest` — **satisfies that range**. With it installed the generator
-  does not warn and does not degrade; it crashes before reading a document:
+  does not warn and does not degrade; it crashes at module load, before reading a
+  document:
 
       TypeError: Cannot read properties of undefined (reading 'AnyKeyword')
-        at node_modules/@hey-api/openapi-ts/dist/init-*.mjs
+        at node_modules/@hey-api/openapi-ts/dist/init-*.mjs:4017:21
+
+  This is not a local misconfiguration. It is upstream
+  [hey-api/hey-api#4235](https://github.com/hey-api/hey-api/issues/4235), "TypeScript
+  7 support (solution)": open, labelled `bug` and `important`, 32 thumbs up, last
+  activity 2026-09-18. The reporter is on 0.99.0 — our version — and quotes the
+  identical error and the identical line number. A fix was proposed the same day
+  as [#4236](https://github.com/hey-api/hey-api/pull/4236), "fix(openapi-ts):
+  support TypeScript 7 consumers", and it was **closed unmerged** on 2026-07-09,
+  so there is no released fix. Re-check both before moving the pin, and re-check
+  whether a newer generator has shipped one.
 
   The declared peer range does not protect you. Only the pin does. Never run
   `npm install typescript`; change the pin deliberately, expect a regeneration

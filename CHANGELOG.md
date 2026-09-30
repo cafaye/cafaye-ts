@@ -70,10 +70,20 @@ Implements `moon/DECISIONS.md` **MD6**.
   Reproduced, not assumed: `@hey-api/openapi-ts@0.99.0` declares
   `peerDependencies: { typescript: ">=5.5.3 || >=6.0.0 || 6.0.1-rc" }`, and
   TypeScript 7.0.2 — published, and npm's `latest` — satisfies it. With 7.0.2
-  installed the generator crashes before reading a document with
-  `TypeError: Cannot read properties of undefined (reading 'AnyKeyword')`, which
-  is the compiler API MD6 says TypeScript 7 removed. The declared peer range does
-  not exclude 7, so the range does not protect you. `npm run typecheck` and
+  installed the generator crashes **at module load**, before reading a document,
+  quoting the same error the upstream issue does:
+
+      TypeError: Cannot read properties of undefined (reading 'AnyKeyword')
+        at node_modules/@hey-api/openapi-ts/dist/init-D6Y8JFUS.mjs:4017:21
+
+  This is upstream [hey-api/hey-api#4235](https://github.com/hey-api/hey-api/issues/4235),
+  "TypeScript 7 support (solution)": open at time of writing, labelled `bug` and
+  `important`, 32 thumbs up, last activity 2026-09-18. The reporter is on 0.99.0
+  and quotes the identical line number. A fix,
+  [#4236](https://github.com/hey-api/hey-api/pull/4236), was opened the same day
+  and **closed unmerged** on 2026-07-09 — so there is no released fix and MD6's
+  "the fix is an open issue" is still accurate. The declared peer range does not
+  exclude 7, so the range does not protect you. `npm run typecheck` and
   `test/no-runtime-dependencies.test.mjs` both fail loudly on a 7.x install.
 - **`js-yaml` forced to `4.3.2` by an npm `override`, resolving five
   high-severity advisories without moving MD6's generator pin.** Versions
@@ -96,7 +106,30 @@ Implements `moon/DECISIONS.md` **MD6**.
   means shipping raw TypeScript would produce a package that a bundler handles
   and plain Node cannot import. A client a self-hoster installs should not need a
   transpiler, so `npm run build` compiles the committed tree and `prepack` runs
-  it — which means a stale `dist/` cannot be published.
+  it — which means a stale `dist/` cannot be published. Verified by installing
+  the packed tarball into a scratch project: `npm install` there pulls in exactly
+  one package and no transitive dependencies, and plain `node` imports it with no
+  transpiler.
+- **Two entrypoints per service, and no pre-built client.** Operations and types
+  are at `cafaye-ts/services/<name>`; `createClient` is at
+  `cafaye-ts/services/<name>/client`. The generator also emits a module-level
+  `client` const pre-pointed at each service's documented production URL, and it
+  is deliberately not reachable from any entrypoint: a self-hoster who reached
+  for it would send their traffic to the public SaaS. Adding `includeInEntry: true`
+  to the client plugin would have put that shared mutable singleton on the public
+  surface; it was tried and reverted, and the reasoning is in
+  `openapi-ts.config.ts`.
+- **The README's examples are executed, and two of them were wrong.** Found by
+  installing the packed tarball into a scratch project and importing it, and by
+  compiling the snippets — not by reading the emitter's output, which looks
+  perfectly plausible either way. `import { createClient } from
+  'cafaye-ts/services/identity'` does not resolve, and `const user: User = await
+  getCurrentUser({ client })` does not compile, because the generated transport
+  returns a result envelope rather than a bare value.
+  `test/readme-examples.test.mjs` now imports every documented specifier against
+  the built package and compiles the snippets with the project's own settings.
+  Both bugs are proven caught: reinstating either turns the suite red with the
+  compiler's own diagnostic.
 - **No source maps in the tarball.** They would point at `.ts` files that are not
   in the tarball, so they would resolve to nothing for every consumer. The
   sources are in the repository, at the commit each generated file's header names.
