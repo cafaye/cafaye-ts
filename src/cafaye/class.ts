@@ -252,7 +252,24 @@ function bodyTextOf(error: unknown): string {
  * ```
  */
 export class Cafaye {
-  /** The `identity` operations, bound to a client. Generated underneath. */
+  /**
+   * The `identity` operations, bound to a client.
+   *
+   * And that is the whole description, because it is the point: these are
+   * **generated**. Sixteen functions and their types come out of identity's
+   * committed OpenAPI document, each carrying the document's own prose into your
+   * editor's autocomplete, and this class does not reimplement one of them. It
+   * supplies the client, the credential and the deadline, and turns the failure
+   * into an exception.
+   *
+   * So the operations are not this package's API in the sense that matters: they
+   * are what a document says, and a document can change. What does not change is
+   * that you reach them through one of these six properties, which is MD6's
+   * "generated code stays an implementation detail, so a generator upgrade can
+   * never break the public API". The generated namespaces are still exported
+   * from the package root, for a caller who wants the raw transport, and this
+   * comment is the honest description of the difference.
+   */
   readonly identity: BoundNamespace<typeof namespaces.identity>;
   /** The `billing` operations, bound to a client. Generated underneath. */
   readonly billing: BoundNamespace<typeof namespaces.billing>;
@@ -276,6 +293,11 @@ export class Cafaye {
 
   constructor(options: CafayeOptions = {}) {
     const env: Readonly<Record<string, string | undefined>> =
+      // `process` is a Node global and this package also runs in a browser, where
+      // the base-URL answer is usually the host's own origin rather than an
+      // environment variable. The `typeof` guard is the whole check: a bundler that
+      // rewrites `process.env` gets the empty object, which is the right answer for a
+      // browser, and one that leaves it alone gets the real thing.
       typeof process === 'undefined' ? {} : process.env;
 
     // Resolved for all six, here, rather than on first use. A base URL that
@@ -289,9 +311,9 @@ export class Cafaye {
 
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     if (typeof timeoutMs !== 'number' || !Number.isFinite(timeoutMs) || timeoutMs < 0) {
-      // A negative or NaN timeout would make `AbortSignal.timeout` throw inside
-      // the transport on the first request, hours after the mistake that caused
-      // it, as a TypeError that names neither the option nor the value.
+      // A negative or non-finite timeout reaches the platform as a `setTimeout`
+      // delay on the first request, hours after the mistake that caused it, as a
+      // `RangeError` from a timer rather than as a complaint about the option.
       throw new CafayeConfigurationError(
         '`timeoutMs` must be a non-negative finite number of milliseconds. A negative or ' +
           'non-finite value would make every request fail inside the platform rather than in ' +
@@ -533,9 +555,23 @@ export class Cafaye {
       if (typeof value !== 'function') continue;
       const operation = value as (options: unknown) => Promise<unknown>;
       bound[name] = async (options?: unknown) => {
+        // The four options this class owns are REMOVED from whatever arrived, not
+        // merely overridden. The types already omit them, so a TypeScript caller
+        // cannot pass them — but a JavaScript one can, and a per-call `baseUrl`
+        // would send one request somewhere the other five are not going, which is
+        // exactly the "one place that decides where requests go" rule breaking
+        // in the one case nobody would notice. `auth` goes for the same reason: a
+        // credential is this class's business, and `setCredentials` is how a
+        // caller changes one.
+        const { baseUrl: _baseUrl, auth: _auth, ...rest } =
+          typeof options === 'object' && options !== null
+            ? (options as Record<string, unknown>)
+            : {};
+
         const envelope = (await operation({
-          ...(typeof options === 'object' && options !== null ? options : {}),
+          ...rest,
           client,
+          baseUrl: this.baseUrls[service],
           throwOnError: false,
         })) as Envelope;
         return this.#unwrap(envelope, `${service}.${name}`);

@@ -389,6 +389,23 @@ describe('credentials on the wire', () => {
     assert.equal(fetchImpl.requests[0].headers.authorization, 'Bearer explicit');
   });
 
+  it('ignores a per-call `baseUrl` or `auth` a JavaScript caller passes anyway', async () => {
+    // The types omit both, so a TypeScript caller cannot reach this — but a
+    // JavaScript one can, and a per-call `baseUrl` would send one request
+    // somewhere the other five are not going, which breaks the rule this class
+    // exists to hold and is exactly the case nobody would notice. Asserted at
+    // runtime because the type is not the only door.
+    const { cafaye, fetchImpl } = client({ credentials: { token: API_TOKEN } });
+    fetchImpl.reply({ id: 'usr_1' });
+    await cafaye.identity.getCurrentUser({
+      baseUrl: 'https://somewhere-else.example.com',
+      auth: 'cafaye_' + 'Z'.repeat(43),
+    });
+
+    assert.equal(fetchImpl.requests[0].url, 'https://cafaye.example.com/v1/me');
+    assert.equal(fetchImpl.requests[0].headers.authorization, `Bearer ${API_TOKEN}`);
+  });
+
   it('picks up a rotated credential on the next request', async () => {
     // Why the attachment is per request rather than per client: a long-lived Node
     // process outlives a token, and a client that captured it at construction

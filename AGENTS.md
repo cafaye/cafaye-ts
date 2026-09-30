@@ -316,7 +316,7 @@ suite tests the pipeline and the pipeline does not compile its own output. The
 type check is the only step that looks at all 96 generated files — and the whole
 of `src/cafaye/` — as TypeScript.
 
-The current floor is **186 pass, 0 fail, 0 skipped**. cafaye-ts-01's baseline was
+The current floor is **187 pass, 0 fail, 0 skipped**. cafaye-ts-01's baseline was
 67; do not go below the current number, and do not fix a red test by loosening an
 assertion, raising a retry or adding a sleep.
 
