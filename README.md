@@ -256,13 +256,13 @@ const cafaye = new Cafaye({ baseUrl: 'https://cafaye.example.com', timeoutMs: 5_
 
 | Service | Operations | Paths | Document version |
 |---|---:|---:|---|
-| `identity` | 16 | 12 | 1.2.0 |
-| `billing` | 15 | 11 | 1.1.0 |
-| `muse` | 1 | 1 | 1.0.0 |
+| `identity` | 31 | 26 | 1.5.0 |
+| `billing` | 15 | 11 | 1.3.0 |
+| `muse` | 1 | 1 | 1.1.0 |
 | `darkroom` | 9 | 7 | 1.0.0 |
 | `pantry` | 4 | 4 | 1.1.0 |
-| `courier` | 8 | 4 | 1.2.0 |
-| **total** | **53** | | |
+| `courier` | 10 | 6 | 2.2.0 |
+| **total** | **70** | | |
 
 All six documents are OpenAPI 3.1. The counts are measured from the documents
 themselves and asserted by the test suite; if a service's document changes size,

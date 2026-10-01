@@ -352,13 +352,15 @@ describe('credentials on the wire', () => {
   });
 
   it('attaches the credential to an operation that declares no security', async () => {
-    // Measured, not assumed. `grep` over the six vendored documents finds
-    // per-operation `security` arrays on eleven identity operations and six
-    // courier ones, and NONE on billing, muse, darkroom or pantry — muse and
-    // darkroom state theirs globally, which the generator does not copy onto each
-    // operation. A client that respected the arrays would silently send
-    // unauthenticated requests to four of six services, and the failure would be
-    // a 401 from a service rather than an error from the client.
+    // Measured, not assumed — and MEASURED, which is the change from the comment
+    // this used to carry. The prose said "per-operation `security` arrays on
+    // eleven identity operations and six courier ones, and NONE on billing, muse,
+    // darkroom or pantry". That was true of the documents cafaye-ts-01 vendored
+    // and stopped being true the moment identity-08 and courier-05 landed, and a
+    // number written in a comment goes stale silently while the sentence around
+    // it still reads as a finding. `the_fleet_declares_auth_in_a_shape_no_operation_honours`
+    // in `vendored-specs.test.mjs` now computes the same thing off the documents
+    // on every run, so the claim is a fact rather than a recollection.
     const { cafaye, fetchImpl } = client({ credentials: { token: API_TOKEN } });
     fetchImpl.reply({ id: 'in_1' });
     await cafaye.billing.getCustomer({ path: { id: 'cus_1' } });

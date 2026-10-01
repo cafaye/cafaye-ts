@@ -3,7 +3,7 @@
 // Source: specs/darkroom.yaml
 //         darkroom, document version 1.0.0,
 //         vendored from git@github.com:cafaye/darkroom.git
-//         at commit bcaa2fe381b7f5d5047a3de862612fc2f81ad059
+//         at commit fdb3455b2737bbbb0b978a75171ab5576f91d202
 // Regenerate: npm run generate
 //            test/regeneration.test.mjs proves regeneration is a no-op,
 //            and that a hand-edit here is reverted by it.

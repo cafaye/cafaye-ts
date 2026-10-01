@@ -57,14 +57,28 @@ import {
  */
 const FLEET = ['identity', 'billing', 'muse', 'darkroom', 'pantry', 'courier'];
 
-/** The operation counts measured from the documents on disk before this packet existed. */
+/**
+ * The operation counts measured from each document, independently of the index.
+ *
+ * Two numbers live in two files on purpose, and the disagreement between them is
+ * the signal: `expectOperations` is what `npm run vendor` enforces, and this
+ * table is what was measured by hand when the document was last read. A vendor
+ * run that moved a document and an edit to `expectOperations` in the same commit
+ * would pass the vendor and fail here — which is the shape you want, because the
+ * question "did the operation count really move, or did somebody just relax the
+ * number" has two files that must agree for the answer to be yes.
+ *
+ * Measured 2026-10-02, after cafaye-ts-01b re-vendored all six. identity moved
+ * 16 -> 31 and courier 8 -> 10; the other four held their counts, and two of
+ * those (darkroom, muse) changed their documents without changing shape.
+ */
 const MEASURED_OPERATIONS = {
-  identity: 16,
+  identity: 31,
   billing: 15,
   muse: 1,
   darkroom: 9,
   pantry: 4,
-  courier: 8,
+  courier: 10,
 };
 
 const index = await readIndex();
@@ -128,7 +142,7 @@ describe('the vendoring index', () => {
     }
   });
 
-  it('agrees with the operation counts measured before this packet existed', () => {
+  it('agrees with the operation counts measured by hand', () => {
     for (const service of FLEET) {
       assert.equal(
         byService.get(service).expectOperations,
@@ -137,7 +151,7 @@ describe('the vendoring index', () => {
       );
     }
     const total = FLEET.reduce((sum, s) => sum + MEASURED_OPERATIONS[s], 0);
-    assert.equal(total, 53, 'the fleet total moved; re-measure and record it in this test');
+    assert.equal(total, 70, 'the fleet total moved; re-measure and record it in this test');
   });
 });
 
