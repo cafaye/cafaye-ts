@@ -39,6 +39,43 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
 
+      - name: Clone the six services, so the drift test can verify provenance
+        # `test/spec-drift.test.mjs` compares every vendored document to
+        # `<repository>:<path> at <commit>` — which is the check that would have
+        # caught the drift cafaye-ts-01b fixed. It skips without a workspace, and
+        # a CI job that only clones this repository would skip it every run, so
+        # the check this packet is about would never run anywhere automated.
+        #
+        # BEFORE bin/prime, and that ordering is the point. `$GITHUB_ENV` applies
+        # to LATER steps only, so cloning afterwards would leave `npm test`
+        # running without `CAFAYE_WORKSPACE` and skipping eleven tests while
+        # reporting a green — which is precisely the "quiet and vacuous" shape the
+        # test exists to rule out, arrived at through the plumbing.
+        #
+        # Six clones, and they are all public, so no credential is needed — the
+        # same property MD3 established for the fleet's other CI. They go into
+        # RUNNER_TEMP rather than beside the checkout so nothing can mistake them
+        # for vendored inputs.
+        #
+        # NOT `--depth 1`. A shallow clone cannot resolve a recorded commit that is
+        # not its single tip, and the drift test's whole point is that "I could not
+        # resolve the recorded ref" is reported as CANNOT VERIFY rather than as a
+        # pass. Cloning shallow here to save 30MB would make the check quietly
+        # vacuous in CI, which is the failure mode the test was written to prevent.
+        #
+        # `--no-tags` keeps the clone to commits. A recorded sha is a commit and
+        # this repository never records a tag, so fetching the fleet's tag history
+        # is bandwidth spent on nothing.
+        run: |
+          mkdir -p "$RUNNER_TEMP/fleet"
+          for service in identity billing muse darkroom pantry courier; do
+            git clone --quiet --no-tags "https://github.com/cafaye/$service" \
+              "$RUNNER_TEMP/fleet/$service"
+          done
+          echo "CAFAYE_WORKSPACE=$RUNNER_TEMP/fleet" >> "$GITHUB_ENV"
+          echo "fleet cloned into $RUNNER_TEMP/fleet; identity is shallow:"
+          git -C "$RUNNER_TEMP/fleet/identity" rev-parse --is-shallow-repository
+
       - name: bin/prime
         run: ./bin/prime
 

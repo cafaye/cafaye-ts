@@ -39,11 +39,8 @@
 //   repository. Whichever is chosen is printed, because a script that silently
 //   picked a directory is a script that vendored the wrong bytes once.
 
-import { execFile } from 'node:child_process';
-import { access, mkdir, writeFile } from 'node:fs/promises';
-import { constants } from 'node:fs';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { promisify } from 'node:util';
 
 import {
   INDEX_PATH,
@@ -55,8 +52,16 @@ import {
   specPathFor,
   writeIndex,
 } from './lib/specs.mjs';
-
-const execFileAsync = promisify(execFile);
+import {
+  exists,
+  git,
+  headCommit,
+  noWorkspaceError,
+  originUrl,
+  readDocumentAt,
+  repositorySlug,
+  resolveWorkspace,
+} from './lib/workspace.mjs';
 
 const USAGE = `Usage: npm run vendor [-- --bump] [--service <name>] [--workspace <dir>]
 
@@ -83,106 +88,6 @@ function parseArgs(argv) {
   return opts;
 }
 
-/** A git call that fails loudly with git's own message attached. */
-async function git(cwd, args) {
-  try {
-    const { stdout } = await execFileAsync('git', args, { cwd, maxBuffer: 64 * 1024 * 1024 });
-    return stdout;
-  } catch (cause) {
-    const detail = (cause.stderr || cause.message || '').trim();
-    throw new Error(`git ${args.join(' ')} in ${cwd} failed: ${detail}`);
-  }
-}
-
-async function isDirectory(p) {
-  try {
-    await access(p, constants.F_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Find the directory holding the sibling checkouts.
- *
- * Every candidate is a real directory that actually contains a checkout of at
- * least one indexed service, so a typo'd `--workspace` is caught here rather
- * than as six confusing "no such file" errors later.
- */
-async function resolveWorkspace(index, explicit) {
-  const wanted = new Set(index.services.map((s) => s.service));
-  // Deduplicated, and order-preserving: a caller who passes `--workspace` and
-  // also has CAFAYE_WORKSPACE set to the same directory should not see that path
-  // listed twice in an error message, which reads as though two different places
-  // were tried and failed.
-  const candidates = [
-    ...(explicit ? [explicit] : []),
-    process.env.CAFAYE_WORKSPACE,
-    path.resolve(REPO_ROOT, '..'),
-    path.resolve(REPO_ROOT, '..', '..', 'cafaye'),
-  ]
-    .filter(Boolean)
-    .map((c) => path.resolve(c))
-    .filter((c, i, all) => all.indexOf(c) === i);
-
-  const tried = [];
-  for (const dir of candidates) {
-    tried.push(dir);
-    if (!(await isDirectory(dir))) continue;
-    // A directory is usable if it holds a git checkout for at least one service
-    // the index names. Partial workspaces are allowed on purpose: a maintainer
-    // bumping one service should not have to clone the other five.
-    for (const service of wanted) {
-      if (await isDirectory(path.join(dir, service, '.git'))) return { dir, tried };
-    }
-  }
-  throw new Error(
-    `cannot find a workspace holding the cafaye checkouts.\n` +
-      `Looked in:\n${tried.map((d) => `  ${d}`).join('\n')}\n` +
-      `Pass --workspace <dir>, or set CAFAYE_WORKSPACE. It must be a directory ` +
-      `containing a checkout of at least one of: ${[...wanted].join(', ')}.`,
-  );
-}
-
-/** The commit a checkout's default branch points at, for `--bump`. */
-async function headCommit(checkout) {
-  const sha = (await git(checkout, ['rev-parse', 'HEAD'])).trim();
-  if (!SHA_PATTERN.test(sha)) {
-    throw new Error(`${checkout}: HEAD is not a 40-character sha (got ${JSON.stringify(sha)})`);
-  }
-  return sha;
-}
-
-/** A checkout's `origin` URL, or null when it has no remote. */
-async function originUrl(checkout) {
-  try {
-    return (await git(checkout, ['remote', 'get-url', 'origin'])).trim();
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Read one document out of a checkout AT a commit.
- *
- * `git cat-file` on `<commit>:<path>` is the only read path used anywhere in
- * this file. It is what turns a recorded sha from a comment into a fact: the
- * bytes are the bytes at that commit, whether or not the working tree agrees.
- */
-async function readDocumentAt(checkout, commit, specPath, service) {
-  try {
-    const stdout = await git(checkout, ['cat-file', '-p', `${commit}:${specPath}`]);
-    return Buffer.from(stdout, 'utf8');
-  } catch (cause) {
-    throw new Error(
-      `${service}: cannot read ${specPath} at ${commit} from ${checkout}.\n${cause.message}\n` +
-        `If that commit is not in this clone, fetch it, or bump the service with --bump ` +
-        `to move it to the current master.`,
-    );
-  }
-}
-
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.help) {
@@ -191,7 +96,12 @@ async function main() {
   }
 
   const index = await readIndex();
+  // Resolution lives in scripts/lib/workspace.mjs, shared with
+  // test/spec-drift.test.mjs. Two implementations of "where is the workspace"
+  // would be two answers, and the drift test's whole claim is that it compared
+  // the same bytes the vendor wrote.
   const { dir: workspace, tried } = await resolveWorkspace(index, opts.workspace);
+  if (workspace === null) throw new Error(noWorkspaceError(index, tried));
   process.stdout.write(`workspace: ${workspace}\n`);
   if (tried.length > 1) {
     process.stdout.write(`  (searched ${tried.length} locations; first match wins)\n`);
@@ -219,20 +129,27 @@ async function main() {
   const staged = [];
   for (const entry of targets) {
     const checkout = path.join(workspace, entry.service);
-    if (!(await isDirectory(path.join(checkout, '.git')))) {
+    if (!(await exists(path.join(checkout, '.git')))) {
       throw new Error(
         `${entry.service}: no checkout at ${checkout}. ${workspace} was chosen because it ` +
           `held at least one service; the others are still required.`,
       );
     }
 
+    // Compared by `owner/name`, not by URL string, so an HTTPS clone of the right
+    // repository is accepted. See `repositorySlug` for why that is the right
+    // question rather than the tempting one.
     const origin = await originUrl(checkout);
-    if (origin && origin !== entry.repository) {
-      throw new Error(
-        `${entry.service}: ${checkout} has origin ${origin}, but the index says the source is ` +
-          `${entry.repository}. Vendoring from the wrong clone is exactly the untraceable ` +
-          `specification this index exists to prevent.`,
-      );
+    if (origin !== null) {
+      const have = repositorySlug(origin);
+      const want = repositorySlug(entry.repository);
+      if (have === null || want === null || have !== want) {
+        throw new Error(
+          `${entry.service}: ${checkout} has origin ${origin}, but the index says the source is ` +
+            `${entry.repository}. Vendoring from the wrong clone is exactly the untraceable ` +
+            `specification this index exists to prevent.`,
+        );
+      }
     }
 
     const commit = opts.bump ? await headCommit(checkout) : entry.commit;
@@ -325,7 +242,6 @@ async function main() {
 
 async function readFileOrNull(p) {
   try {
-    const { readFile } = await import('node:fs/promises');
     return await readFile(p);
   } catch {
     return null;

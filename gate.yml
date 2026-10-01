@@ -27,6 +27,12 @@ gate:
   # obvious route. `mise run prime` applies the pin from mise.toml, so the
   # `==> node v22.19.0` in the log is a number the declaration can stand behind.
   #
+  # The count in that sentence is the historical one and stays the historical one.
+  # It is a measurement dated 2026-09-30, and editing it to today's 201 would make
+  # the paragraph describe a run that never happened. `minimum` below is the live
+  # number and it moved for a reason: cafaye-ts-01b added
+  # `test/spec-drift.test.mjs`, eleven assertions in all.
+  #
   # The cost of this choice, stated rather than hidden: `command[0]` is then a
   # bare name, so `check_command` cannot see the file and reports
   # `gate.command-unknown` on a machine without mise. That is the checker's
@@ -52,29 +58,48 @@ gate:
     # 1. The suite's own count. This is the decrease-detector, and it is the
     #    only one of the three that has a floor.
     #
-    #    187 is what `npm test` reported on this tree, measured, and it is
+    #    201 is what `npm test` reported on this tree, measured, and it is
     #    raised in the same commit that adds a test — a floor left behind is a
     #    floor nobody notices has stopped protecting anything. A suite that
     #    quietly lost forty tests cannot report itself as passing.
+    #
+    #    The 187 it replaced was the cafaye-ts-02 floor. cafaye-ts-01b added
+    #    `test/spec-drift.test.mjs` — eleven assertions covering all six
+    #    services' recorded refs, their byte-equality at those refs, and the
+    #    staleness report — plus two in `vendored-specs.test.mjs` that turn a
+    #    measurement carried in a comment into one computed off the documents on
+    #    every run, and one in `suite-is-offline.test.mjs` that asserts each of
+    #    its own six rules still catches a violation in its real shape. That last
+    #    one is what found a hole in the git rule: the pattern excluded quotes
+    #    between `git` and the subcommand, so `execFileSync("git", ["clone", …])`
+    #    — the shape this repository's own `workspace.mjs` uses — read as clean.
     #
     #    It is also the line that proves the runner reached its summary at all,
     #    and that is not a formality here. Measured on node 22.19.0: `node
     #    --test` pointed at a glob that matches no file prints `# pass 0` and
     #    exits 0. That is the cafaye-rb defect — a tier that filtered itself out
     #    of existence, a green, and nothing that noticed — reproduced in
-    #    TypeScript. 0 < 187, so it is red here.
+    #    TypeScript. 0 < 201, so it is red here.
     - id: suite-pass
       match: '^# pass ([0-9]+)$'
-      minimum: 187
+      minimum: 201
     # 2. Nothing skipped, in the suite's own words.
     #
     #    This is the proof the count above cannot make on its own, and the case
     #    was measured rather than imagined. A test rewritten as `test.skip`
-    #    raises `# tests` and leaves `# pass` at 187 — the number a reader is
+    #    raises `# tests` and leaves `# pass` at 201 — the number a reader is
     #    scanning moves, and the number this floor reads does not. `# skipped`
     #    is the only line that moves with it. core's rule is that a skipped check
     #    is not a passing check, and `# skipped 0` is that rule in a form the
     #    checker can read.
+    #
+    #    It earns its place in a way it did not have to before cafaye-ts-01b,
+    #    because spec-drift.test.mjs is the first test here that CAN skip on a
+    #    healthy machine: it skips when there is no cafaye workspace beside the
+    #    checkout, which is exactly what a self-hoster's `npm install` from npm
+    #    looks like. Eleven verified passes is the right answer there. Eleven
+    #    skipped checks reported as eleven passes would be the cafaye-rb defect
+    #    again, and this proof is what makes it impossible.
     - id: suite-no-skip
       match: '^# skipped 0$'
     # 3. Two of this gate's three steps are silent when they succeed. `npm ci`
@@ -121,15 +146,30 @@ external:
         # a cache is what makes it invisible.
         unmet: bin/prime's npm ci step exits 1 with "npm error code ENOTCACHED" and leaves no node_modules/
   # NOT required, and named here so nobody goes looking for them: no database, no
-  # service, no credential, and no network once npm's cache is warm.
+  # running service, no credential, and no network once npm's cache is warm.
   #
   # The last one is the one that would be got wrong here, because
   # test/suite-is-offline.test.mjs exists precisely to keep the SUITE offline.
-  # That test is about the 187 tests and it holds: they never fetch the six
+  # That test is about the 201 tests and it holds: they never fetch the six
   # OpenAPI documents, because the vendored bytes under specs/ are the artifact
   # and the shas in specs/index.json are their provenance. The gate is a
   # different question. `npm ci` reaches the registry before any test runs, so
   # the offline suite does not make the offline gate.
+  #
+  # AND IT STILL HOLDS WITH `test/spec-drift.test.mjs` IN THE SUITE, which is
+  # the thing worth stating plainly because it is the newest claim here.
+  # spec-drift.test.mjs reads each document out of a SIBLING CHECKOUT with
+  # `git cat-file`, which is the local object store and contacts no remote. It
+  # needs the six clones to EXIST — which is why CI clones them, in a step before
+  # bin/prime, because `$GITHUB_ENV` applies to later steps only — and a run with
+  # no workspace beside it reports eleven SKIPPED tests rather than eleven passes.
+  # `# skipped 0` above is what makes that honest: the proof fails if the drift
+  # test skips, so "could not verify" can never be read as "verified".
+  #
+  # What is NOT required is a Postgres and a running identity. Those belong to
+  # `npm run e2e:identity`, which is not in the gate and must not become part of
+  # it: see the header of scripts/e2e-identity.mjs for why a test that starts a
+  # service and a database does not belong beside a suite that must run offline.
 
 ci:
   workflow: .github/workflows/ci.yml

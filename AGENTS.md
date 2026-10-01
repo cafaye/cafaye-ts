@@ -28,9 +28,11 @@ openapi-ts.config.ts   the generator's configuration. Reads specs/index.json; ho
 specs/index.json       PROVENANCE. repository, path, 40-char commit sha, sha256 and measured counts, per service
 specs/<service>.yaml   the six vendored documents, verbatim copies, committed
 scripts/lib/specs.mjs  the one implementation of "what a vendored document is" and how to measure it
+scripts/lib/workspace.mjs  where the six checkouts are, and how to read a document out of one at a sha
 scripts/vendor.mjs     re-vendor, at the recorded shas. One command, all six, atomic
 scripts/generate.mjs   run the generator for every service in the index
 scripts/verify-specs.mjs  check the documents against the index; write nothing
+scripts/e2e-identity.mjs  drive a REAL identity against a REAL Postgres. Not in the gate
 src/index.ts           the public entrypoint: Cafaye, the error types, the six namespaces
 src/cafaye/class.ts    THE HAND-WRITTEN CLIENT. Credentials, deadlines, error mapping
 src/cafaye/base-url.ts where requests go, in a documented order, with no default
@@ -39,9 +41,17 @@ src/cafaye/errors.ts   the RFC 9457 exception hierarchy
 src/cafaye/redact.ts   the scrubber, and safeCause
 src/cafaye/services.ts the six generated namespaces, imported exactly once
 src/services/<name>/   GENERATED, COMMITTED. 16 files per service, 96 in total
-test/                  five properties, the README's examples, and seven wrapper files
+test/                  five properties, the drift check, the README's examples, and seven wrapper files
 bin/prime              the gate: npm ci, typecheck, the full test suite
 ```
+
+`scripts/lib/workspace.mjs` exists because `scripts/vendor.mjs` and
+`test/spec-drift.test.mjs` both need to know where the fleet is and how to read a
+document out of it, and **two implementations is two answers**. The drift test's
+entire claim is that it compared the bytes the vendor wrote; a second copy of the
+workspace resolution would make that claim false in exactly the way this
+repository's own header warns about. The vendor imports it and the test imports it
+and neither owns it.
 
 `specs/` is the only place a service's OpenAPI path appears, and
 `openapi-ts.config.ts` derives its service list from `specs/index.json`. Neither
@@ -74,15 +84,68 @@ within a service, and nothing in a consumer's install regenerates anything. The
 whole self-hostable constraint rests on this: a client installs from npm with no
 git clones and no reachable remotes.
 
-**The six documents are vendored, committed, and carry provenance.** Each entry
-in `specs/index.json` records the source repository, the path within it, the
-**full 40-character commit sha** the copy was taken at, the sha256 of the bytes
-that were vendored, and the measured operation and path counts. `npm run vendor`
-reads every document with `git cat-file -p <commit>:<path>` — **never from a
-working tree** — and resolves all six before writing any, so a partial update is
+**The six documents are vendored, committed, and carry provenance, and the
+provenance is CHECKED against the source — for all six, not the one you touched.**
+Each entry in `specs/index.json` records the source repository, the path within
+it, the **full 40-character commit sha** the copy was taken at, the sha256 of the
+bytes that were vendored, and the measured operation and path counts. `npm run
+vendor` reads every document with `git cat-file -p <commit>:<path>` — **never from
+a working tree** — and resolves all six before writing any, so a partial update is
 impossible by ordering rather than by rollback. Do not shorten a sha. An
-abbreviated sha is what every terminal prints by default and it cannot be
-resolved by anything.
+abbreviated sha is what every terminal prints by default and it cannot be resolved
+by anything.
+
+`test/spec-drift.test.mjs` closes the loop `npm run vendor` opens: it asserts every
+vendored document is byte-for-byte what `<repository>:<path>` said **at the
+recorded commit**, read out of a local checkout with `git cat-file`. It covers all
+six and it writes all six out itself rather than deriving them from the index,
+because a drift test guarding only the service you happened to touch is the
+one-consumer problem narrowed rather than fixed.
+
+**The claim is about the recorded commit, never about the working tree.** That is
+borrowed from `pantry/tests/recorded_copy.rs`, and it is borrowed because pantry
+already paid for the other version: its `tests/drift.rs` compared against the
+working tree, so `identity-09` and `muse-06` landing turned *pantry's* gate red in
+a repository nobody had touched, and each red was reported as pantry being broken.
+Here the same thing would be worse, because the vendored document is the artifact
+the generator reads — a test comparing to the working tree goes red every time any
+service merges, and every red is reported against `cafaye-ts`. The difference is
+who a red belongs to: at a recorded ref, "a merge in `identity`" and "somebody
+edited `specs/identity.yaml` here" become different failures, and only the second
+is a defect in this repository.
+
+**Three failure shapes, three different answers, and none of them is a pass.**
+
+- no workspace at all → **skip**, loudly, naming every directory searched. A
+  self-hoster installs this from npm with no sibling checkouts and the suite must
+  still pass for them; `test/vendored-specs.test.mjs` is what proves it, entirely
+  offline. The skip uses `t.skip()`, so `node --test` counts it in `# skipped` and
+  **not** in `# pass`, and `gate.yml`'s `# skipped 0` proof goes red.
+- workspace present, recorded ref absent → **fail**, "cannot verify", with the
+  fix. This is the shallow-clone case, and it is the honest answer rather than a
+  pass: a depth-limited history cannot resolve a recorded commit that is not its
+  tip, and reporting that as six verifications is how a fleet comes to believe it
+  is up to date because the thing that would have told it otherwise could not run.
+- workspace present, ref readable, bytes differ → **fail**, naming the ref, both
+  digests and the first differing line. Both causes are defects here: a
+  hand-edited document, or a commit bumped without re-copying.
+
+**Staleness is a REPORT with a budget, never a gate.** The distance from each
+recorded commit to its service's published head prints on every run, and a copy
+more than **9 commits** behind fails with the one command that closes it. Not
+zero — zero is exactly the defect this replaces, a gate that goes red whenever
+anybody merges. Not unbounded — unbounded is the "quiet and still wrong" it
+replaces, where the document is accurate as of its recorded ref and nobody has been
+told `identity` has merged fifteen times since. Nine is roughly a working day of
+this fleet's merge rate, and the constant is a named `const` so moving it is a
+visible diff rather than an edit to a number inside a sentence.
+
+**Comparing two clones is by `owner/name`, not by URL string.** The index records
+`git@github.com:cafaye/identity.git` because PLAN.md §1 makes SSH the house
+remote, and a CI job or a self-hoster legitimately holds an HTTPS clone of the
+same repository. `repositorySlug` in `scripts/lib/workspace.mjs` accepts both and
+strips `.git`, because the check that matters is "is this the right repository" —
+which catches a fork — and not "is this the right transport".
 
 **`courier`'s document is at its repository root.** `openapi.yaml`, not
 `openapi/v1.yaml` like the other five. A loop that assumed the conventional path
@@ -219,14 +282,31 @@ is not two.
 
 **The credential attaches to every request, unconditionally.** The obvious
 refinement is to attach it only where the document declares a security scheme,
-and it is measurably wrong for this fleet: `grep` over the six vendored documents
-finds per-operation `security` arrays on eleven identity operations and six
-courier ones, and **none** on billing, muse, darkroom or pantry — muse and
-darkroom state theirs globally, which the generator does not copy onto each
-operation, and billing and pantry state `security: []` with a note. A client that
-respected the arrays would send unauthenticated requests to four of six services
-and the failure would be a 401 from a service rather than an error from the
-client. The measurement is written into the test that depends on it.
+and it is measurably wrong for this fleet: four of the six documents have
+operations whose auth **no generated operation can see**, because a
+document-level `security` is not copied onto each operation. Measured over the
+vendored documents on 2026-10-02, and computed on every test run rather than
+written down, by `the_fleet_declares_auth_in_a_shape_no_operation_honours` in
+`test/vendored-specs.test.mjs`:
+
+```
+identity  20 operations with a per-operation security array, 11 declaring [], no document-level
+billing    0 with per-operation security,  0 declaring [], no document-level auth
+muse       0 with per-operation security,  0 declaring [], document-level auth
+darkroom   0 with per-operation security,  2 declaring [], document-level auth
+pantry     0 with per-operation security,  0 declaring [], no document-level auth
+courier   10 with per-operation security,  0 declaring [], document-level auth
+```
+
+A client that respected the arrays would send unauthenticated requests to at least
+four of six services, and the failure would be a 401 from a service rather than an
+error from the client.
+
+This paragraph used to carry the same measurement as prose — "eleven identity
+operations and six courier ones" — and it went stale the moment identity-08
+landed, while the sentence around it still read like a finding. That is the reason
+it is a computed assertion now: a number inside a comment cannot fail, and a
+measurement that cannot fail is a memory.
 
 **The class owns the `AbortController`, not `AbortSignal.any`.** `any` adopts the
 reason from whichever signal fired, so a caller who aborts with an error of their
@@ -289,18 +369,36 @@ Stated in the spirit of **MD5**, which is a standing practice and not a comment
 in one file. A green suite here means the vendored bytes match `specs/index.json`,
 the committed tree matches the pinned generator, and the wrapper does what its
 tests say. It says **nothing** about whether the recorded shas are still what
-those repositories are on `master`. That is `npm run vendor -- --bump`, and it is
-a human decision. Re-read the index's `commit` column before assuming this client
-matches what a service is actually serving — `identity`'s is behind right now, on
-purpose, and deliberately: the vendored copy is at `35c2576` and the scoped API
-token routes landed in `bff6333`, which is why this client has no typed
-`createApiKey` even though the credential shape it reads (`cafaye_` plus 32 bytes)
-is the one identity mints. Re-vendoring is `cafaye-ts-03`'s decision, not this
-class's, and the brief for this packet forbade touching the provenance.
+those repositories are on `master`.
+
+`test/spec-drift.test.mjs` narrowed that second gap from "nothing" to "a printed
+number and a nine-commit budget", and it is worth being precise about what remains.
+It proves every vendored document is byte-for-byte what its repository said **at
+the recorded commit**, which is a claim that is true or false for a reason inside
+this repository. It does **not** prove the recorded commit is `master`. The
+staleness report prints the distance on every run and fails past the budget; the
+move itself is `npm run vendor -- --bump`, and it is still a human decision. All
+six were at their published heads when cafaye-ts-01b ran, which is why the report
+reads `6 current, 0 behind` — and that is a measurement of one afternoon, not a
+property the package has.
 
 It also says nothing about whether a **service** honours its own document. The
 generated types come from the documents, so a service that drifts produces a
 wrong value shaped like a right one, and no amount of type checking sees it.
+`npm run e2e:identity` is the partial answer — a real identity against a real
+Postgres, driven through this client — and it is not in the gate, because a gate
+that needs a database and a running service is a gate nobody can run. What it
+found on its first run is in `REPORT-cafaye-ts-01b.md`; three of the five things it
+checked that turned out to be wrong were wrong in the script, not in the client.
+
+**`identity`'s document does not describe everything `identity` serves.** Its
+router has `GET /v1/accounts` and `POST /v1/accounts` — `internal/httpapi/accounts.go`
+documents both and `authz_matrix_test.go` calls the GET — and `openapi/v1.yaml`
+has neither. So this client cannot name the account a registration created, which
+is why `scripts/e2e-identity.mjs` reads one account id out of `psql` and says so
+in its header. That is drift in the direction the drift test does not cover: not
+"the copy is old" but "the document is incomplete". Closing it means editing
+identity's document, which this repository does not own.
 
 ## Gates
 
@@ -316,11 +414,11 @@ suite tests the pipeline and the pipeline does not compile its own output. The
 type check is the only step that looks at all 96 generated files — and the whole
 of `src/cafaye/` — as TypeScript.
 
-The current floor is **187 pass, 0 fail, 0 skipped**. cafaye-ts-01's baseline was
+The current floor is **201 pass, 0 fail, 0 skipped**. cafaye-ts-01's baseline was
 67; do not go below the current number, and do not fix a red test by loosening an
 assertion, raising a retry or adding a sleep.
 
-**`gate.yml` at the root declares that gate, and `minimum: 187` in it is that
+**`gate.yml` at the root declares that gate, and `minimum: 201` in it is that
 floor as a number a machine reads.** It is written against core's
 `schemas/gate.schema.json` and checked by core's `harness/bin/gate-check`, so
 "what gates this repository", "what the gate needs from the machine" and "what
@@ -328,6 +426,24 @@ the log must say before the word green means anything" are one checked file
 rather than three things to remember. `mise run prime` is the declared command
 and `bin/prime` is the entrypoint; run the static check from a core checkout with
 `harness/bin/gate-check --prove .`.
+
+**`# skipped 0` is load-bearing in a way it was not before cafaye-ts-01b.**
+`test/spec-drift.test.mjs` is the first test in this repository that can skip on a
+perfectly healthy machine — it skips when there is no cafaye workspace beside the
+checkout, which is exactly what a self-hoster's `npm install` from npm looks
+like. Eleven verified passes is the correct answer there. Eleven skipped checks
+reported as eleven passes is the cafaye-rb defect again, and the `# skipped 0`
+proof is what makes it impossible. A run that skips the drift test is a run that
+verified nothing about provenance and says so in a number the gate reads.
+
+**CI clones the six services before `bin/prime`, in that order, for a plumbing
+reason worth knowing about.** `$GITHUB_ENV` applies to *later* steps only, so a
+clone step placed after `bin/prime` would leave `npm test` running without
+`CAFAYE_WORKSPACE` and skipping eleven tests while reporting green. And the clones
+are deliberately **not** `--depth 1`: a shallow clone cannot resolve a recorded
+commit that is not its tip, and the drift test reports that as CANNOT VERIFY, so
+cloning shallow to save 30MB would make the check quietly vacuous in CI — the
+exact failure mode the test was written to prevent.
 
 **Raise `minimum` in the same commit that adds a test.** It is a ratchet, not a
 target: a suite that quietly lost tests cannot report itself as passing, and a
@@ -376,8 +492,13 @@ generator.
 
 - **The documents themselves.** They belong to `identity`, `billing`, `muse`,
   `darkroom`, `pantry` and `courier`. This repository holds copies with
-  provenance and never edits them. Re-vendoring `identity` onto `bff6333` is the
-  obvious next packet and is deliberately not this one.
+  provenance and never edits them. All six were re-vendored at their current
+  masters by cafaye-ts-01b; the next bump is somebody else's decision.
+- **A document's completeness.** The drift test proves the vendored copy is what
+  its source said at the recorded ref. It cannot prove the document describes
+  everything the service serves, and identity's does not: `GET /v1/accounts` and
+  `POST /v1/accounts` are in its router and absent from `openapi/v1.yaml`. Fixing
+  that is an edit to identity's document.
 - **Publishing to npm.** The package is shaped for it and the tarball is
   asserted, but it is not published and the name is provisional; whether this
   publishes unscoped or under `@cafaye/*` belongs with whoever owns the npm
@@ -393,3 +514,26 @@ generator.
   canonical. This client does not read either — it forwards the credential
   without parsing it — so MD7 is invisible here, which is the right outcome and
   worth noticing: the ambiguity is contained inside the token.
+  `scripts/e2e-identity.mjs` is where you can watch it directly, because it
+  introspects a real token and prints both.
+
+## `npm run e2e:identity`, and why it is not in the gate
+
+`scripts/e2e-identity.mjs` drives a real `identity` — built from source, running
+against a migrated Postgres — through this client, and it asserts 41 things about
+what comes back. It registers a user, signs in, reads the session back, mints a
+scoped API token, introspects it, revokes it, and checks identity's own RFC 9457
+error bodies become typed exceptions.
+
+It is **not** in `npm test`, and it must not be put there. `bin/prime` runs the
+suite; a suite that needs a database and a running service is a suite nobody can
+run, and `test/suite-is-offline.test.mjs` exists to keep sockets out of CI. The
+separation is not a compromise — the two checks answer different questions. The
+suite proves the artifact is what the provenance says. The e2e proves the artifact
+talks to a real service, which is the one thing the suite structurally cannot.
+
+Set it up with a migrated database and `npm run e2e:identity`; the recipe is in
+`REPORT-cafaye-ts-01b.md`. **Do not edit `identity` to make it pass.** Its
+document and its code were right every time the script was wrong, and the three
+times they were wrong is the most useful thing the run reported — which is only
+worth having because nothing was bent to accommodate the expectation.

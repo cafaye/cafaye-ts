@@ -9,7 +9,120 @@ commit that caused it and the one line that changes to opt back in.
 
 ## [Unreleased]
 
+### Changed
+
+- **All six vendored documents re-copied at their current masters, and the client
+  regenerated.** The client was describing services that had moved underneath it.
+  Every entry in `specs/index.json` moved forward; five of the six documents
+  changed bytes.
+
+  | Service | Operations | Paths | Document version | |
+  |---|---:|---:|---|---|
+  | `identity` | 16 → **31** | 12 → **26** | 1.2.0 → **1.5.0** | fifteen new operations |
+  | `courier` | 8 → **10** | 4 → **6** | 1.2.0 → **2.2.0** | `sendMessage`, `receiveResendReport` |
+  | `billing` | 15 | 11 | 1.1.0 → **1.3.0** | |
+  | `muse` | 1 | 1 | 1.0.0 → **1.1.0** | auth model moved |
+  | `pantry` | 4 | 4 | 1.1.0 | |
+  | `darkroom` | 9 | 7 | 1.0.0 | **sha256 unchanged — verified no drift** |
+
+  `darkroom` is a result rather than a skip: its document is byte-identical at the
+  new commit, so the recorded sha moved and the vendored file was not rewritten.
+  That is the only honest reading available for a service whose document did not
+  change.
+
+  All six, not the two in the current launch set. **`muse` is the reason**: its
+  auth moved from "the token is not verified" to a verified JWT that must
+  additionally carry `completions:write` and an `account_id`, with a new 403. A
+  client describing an unenforced auth model is a correctness problem in the
+  artifact, and a caller generated from it writes code that gets 401s.
+
+  The fifteen `identity` additions are the scoped API token surface
+  (`listApiKeys`, `mintApiKey`, `revokeApiKey`, `introspectApiKey`), the account
+  admin surface (`listAccountAuditLog`, `revokeAccountInvitation`,
+  `revokeAccountInvitations`) and the self-service mail surface
+  (`requestPasswordReset`, `confirmPasswordReset`, `requestEmailVerification`,
+  `confirmEmailVerification`, `getEmailVerificationStatus`,
+  `requestEmailChange`, `confirmEmailChangeCurrentAddress`,
+  `confirmEmailChangeNewAddress`).
+
+  Breaking for anyone who counted: `cafaye.identity` now has 31 operations rather
+  than 16, `cafaye.courier` has 10 rather than 8, and both namespaces gained names
+  that did not exist. No operation was removed or renamed, so no call site breaks;
+  the fleet total moves from 53 to 70.
+
 ### Added
+
+- **`test/spec-drift.test.mjs` — every vendored document is byte-for-byte what its
+  service said AT THE COMMIT THIS REPOSITORY RECORDS, for all six services.** The
+  gap it closes is the one that let a month of drift accumulate: the sha256 check
+  proved the vendored bytes matched `specs/index.json`, and both of those were
+  stale together, so nothing was ever red.
+
+  - **The claim is about the recorded commit, never the working tree**, borrowed
+    from `pantry/tests/recorded_copy.rs`. Pantry's earlier `tests/drift.rs`
+    compared to the working tree, so merges in other repositories turned *its*
+    gate red and were reported as pantry being broken. Here the same shape would
+    be worse, because the vendored document is the artifact the generator reads.
+    At a recorded ref, "a merge in `identity`" and "somebody edited
+    `specs/identity.yaml`" become different failures and only the second is a
+    defect here.
+  - **A shallow clone that cannot resolve the recorded ref is a FAILURE reading
+    "cannot verify", not a pass.** With no workspace at all the tests SKIP, loudly
+    and through `t.skip()`, so `node --test` counts them in `# skipped` and not in
+    `# pass` — which `gate.yml`'s `# skipped 0` proof then reads.
+  - **Staleness is a report with a budget, not a gate.** The distance from each
+    recorded commit to its service's published head prints on every run; more than
+    **9 commits** behind fails with the command that closes it.
+  - Provenance is compared by `owner/name`, not by URL string, so an HTTPS clone
+    of the right repository is accepted while a fork is still refused.
+
+- **`scripts/lib/workspace.mjs`** — where the six checkouts are and how to read a
+  document out of one at a sha. Extracted because `scripts/vendor.mjs` and
+  `test/spec-drift.test.mjs` both need it and two implementations is two answers;
+  the drift test's whole claim is that it compared the bytes the vendor wrote.
+  `scripts/vendor.mjs` now imports it, and the origin check it performed by exact
+  URL string became an `owner/name` comparison here.
+
+- **`npm run e2e:identity` (`scripts/e2e-identity.mjs`) — the regenerated client
+  against a real `identity` and a real Postgres.** 41 assertions, no mock and no
+  fixture: register, sign in, read the session back, mint a scoped API token,
+  introspect it, list it, revoke it, and check identity's own RFC 9457 bodies
+  become typed exceptions. Deliberately **not** in the gate — a suite needing a
+  database and a running service is a suite nobody can run, and
+  `test/suite-is-offline.test.mjs` exists to keep sockets out of CI. No dependency
+  added: `psql` is invoked as a subprocess, because `dependencies` is `{}` and
+  stays `{}`.
+
+- **CI clones the six services before `bin/prime`.** Without it the drift test
+  skips on every run and the check this packet is about never runs anywhere
+  automated. Before it, because `$GITHUB_ENV` applies to later steps only. Not
+  `--depth 1`, because a shallow clone cannot resolve a recorded commit that is
+  not its tip and the drift test would correctly report "cannot verify" every
+  time.
+
+- **`test/suite-is-offline.test.mjs` grew a self-test, and it immediately found a
+  hole.** Each of the six rules in that file is a claim about what cannot appear in
+  a test file, and a claim only ever exercised by the absence of an offender is a
+  sentence rather than a check. The new assertion runs fifteen real violation
+  shapes past the rules and six pieces of prose the rules must *not* fire on.
+  - The git rule excluded quotes between `git` and the subcommand, so
+    `execFileSync("git", ["clone", url, dir])` — the shape
+    `scripts/lib/workspace.mjs` uses — read as clean. `[^'"\n]` is now `[^\n]`.
+  - The same rule had no left word boundary, so it matched the word
+    "**legit**imately" in a comment in `spec-drift.test.mjs`. It is now `\bgit\b`.
+  - The remote rule named only the subcommand form (`git remote get-url`), so this
+    packet's own rewrite of `scripts/vendor.mjs` to `git config --get
+    remote.origin.url` sailed past it. Both spellings are now covered.
+  Widened, not weakened, and the false-positive half is asserted too, because a
+  check that catches its own documentation is a check that gets disabled.
+
+- **`the_fleet_declares_auth_in_a_shape_no_operation_honours`** in
+  `test/vendored-specs.test.mjs` — the measurement behind the wrapper's
+  unconditional credential attachment, computed off the six documents on every
+  run. It used to be prose in `AGENTS.md` and in a comment in
+  `wrapper-class.test.mjs`, reading "eleven identity operations and six courier
+  ones"; it went stale when identity-08 landed while the sentence around it still
+  read like a finding. A number inside a comment cannot fail.
 
 - **`gate.yml` — the gate is declared rather than discovered, and the declaration
   is load-bearing.** core ships the format (`schemas/gate.schema.json`), the
@@ -29,18 +142,20 @@ commit that caused it and the one line that changes to opt back in.
     warnings. `mise run prime` applies the pin from `mise.toml`, which is what
     makes the toolchain requirement load-bearing instead of decorative.
   - **Three proofs, because the log is not equally informative about all three
-    steps.** `# pass 187` is the decrease-detector and the floor.
-    `# skipped 0` is separate because a test rewritten as `.skip` raises
-    `# tests` and leaves `# pass` at 187 — measured, not imagined — so the count
-    a reader scans moves while the count the floor reads does not. And `tsc
-    --noEmit` prints **nothing** on success, so `==> npm test` is the only line in
-    the whole log that is evidence the frozen install and the type check over the
-    96 generated files both succeeded.
+    steps.** `# pass 201` is the decrease-detector and the floor, raised from 187
+    by this packet. `# skipped 0` is separate because a test rewritten as `.skip`
+    raises `# tests` and leaves `# pass` alone — measured, not imagined — so the
+    count a reader scans moves while the count the floor reads does not; and it
+    now carries more weight, because `spec-drift.test.mjs` is the first test here
+    that can skip on a healthy machine. And `tsc --noEmit` prints **nothing** on
+    success, so `==> npm test` is the only line in the whole log that is evidence
+    the frozen install and the type check over the 96 generated files both
+    succeeded.
   - **`selfContained: false`, with two requirements and each one's `unmet`
     observed rather than predicted.** node 22.19.0, and the npm registry or an
     npm cache already holding the tree — `npm ci` reinstalls the lockfile from
     scratch on every run, so this one is not "once, on a cold checkout" the way
-    core's PyPI requirement is. No database, no service, no credential.
+    core's PyPI requirement is. No database, no running service, no credential.
     `test/suite-is-offline.test.mjs` keeps the *suite* offline and that is
     still true; `npm ci` runs before any test does, so the offline suite does not
     make the gate offline.
