@@ -39,11 +39,15 @@ import path from 'node:path';
 import { describe, it } from 'node:test';
 
 import {
+  HTTP_METHODS,
   REPO_ROOT,
   SHA_PATTERN,
   measureVendoredDocument,
   readIndex,
+  specPathFor,
 } from '../scripts/lib/specs.mjs';
+
+const METHODS = new Set(HTTP_METHODS);
 
 /**
  * The six services, written out here rather than derived from the index.
@@ -57,14 +61,28 @@ import {
  */
 const FLEET = ['identity', 'billing', 'muse', 'darkroom', 'pantry', 'courier'];
 
-/** The operation counts measured from the documents on disk before this packet existed. */
+/**
+ * The operation counts measured from each document, independently of the index.
+ *
+ * Two numbers live in two files on purpose, and the disagreement between them is
+ * the signal: `expectOperations` is what `npm run vendor` enforces, and this
+ * table is what was measured by hand when the document was last read. A vendor
+ * run that moved a document and an edit to `expectOperations` in the same commit
+ * would pass the vendor and fail here — which is the shape you want, because the
+ * question "did the operation count really move, or did somebody just relax the
+ * number" has two files that must agree for the answer to be yes.
+ *
+ * Measured 2026-10-02, after cafaye-ts-01b re-vendored all six. identity moved
+ * 16 -> 31 and courier 8 -> 10; the other four held their counts, and two of
+ * those (darkroom, muse) changed their documents without changing shape.
+ */
 const MEASURED_OPERATIONS = {
-  identity: 16,
+  identity: 31,
   billing: 15,
   muse: 1,
   darkroom: 9,
   pantry: 4,
-  courier: 8,
+  courier: 10,
 };
 
 const index = await readIndex();
@@ -128,7 +146,7 @@ describe('the vendoring index', () => {
     }
   });
 
-  it('agrees with the operation counts measured before this packet existed', () => {
+  it('agrees with the operation counts measured by hand', () => {
     for (const service of FLEET) {
       assert.equal(
         byService.get(service).expectOperations,
@@ -137,7 +155,7 @@ describe('the vendoring index', () => {
       );
     }
     const total = FLEET.reduce((sum, s) => sum + MEASURED_OPERATIONS[s], 0);
-    assert.equal(total, 53, 'the fleet total moved; re-measure and record it in this test');
+    assert.equal(total, 70, 'the fleet total moved; re-measure and record it in this test');
   });
 });
 
@@ -188,6 +206,92 @@ describe('each vendored document', () => {
     for (const service of FLEET) {
       assert.equal(byService.get(service).openapi, '3.1.0', `${service} is not OpenAPI 3.1.0`);
     }
+  });
+});
+
+describe('the fleet declares auth in a shape no single operation honours', () => {
+  // The measurement `wrapper-class.test.mjs`'s "attaches the credential to an
+  // operation that declares no security" used to carry as prose, computed.
+  //
+  // `Cafaye` attaches the credential to EVERY request, unconditionally. The
+  // obvious refinement — attach it only where the document declares a security
+  // scheme — is wrong for this fleet, and this is the proof rather than the
+  // assertion: the generator does not copy a document-level `security` onto each
+  // operation, so per-operation arrays cannot express what four of the six
+  // services actually require. A client that respected them would send
+  // unauthenticated requests to those four, and the failure would be a 401 from a
+  // service rather than an error from the client.
+  //
+  // Read off the documents on every run, which is the change from the comment it
+  // replaces. That comment said "eleven identity operations and six courier ones,
+  // and NONE on billing, muse, darkroom or pantry", and identity-08 landed and made
+  // it wrong while the sentence around it still read like a finding.
+  const perOperation = new Map();
+  for (const service of FLEET) perOperation.set(service, { declared: 0, empty: 0, documentLevel: 0 });
+
+  it('finds operations with no per-operation `security` at all, in four of six services', async () => {
+    const { load } = await import('js-yaml');
+    for (const entry of index.services) {
+      const doc = load(await readFile(specPathFor(entry), 'utf8'));
+      const tally = perOperation.get(entry.service);
+
+      // Document-level counts too: muse and darkroom state theirs globally, and
+      // `security: []` at the document level means the same thing an empty
+      // per-operation array means — "nothing required" — so both are recorded.
+      if (Array.isArray(doc.security) && doc.security.length > 0) tally.documentLevel += 1;
+
+      for (const item of Object.values(doc.paths ?? {})) {
+        for (const [method, operation] of Object.entries(item ?? {})) {
+          if (!METHODS.has(method.toLowerCase())) continue;
+          if (Array.isArray(operation.security)) {
+            if (operation.security.length === 0) tally.empty += 1;
+            else tally.declared += 1;
+          }
+        }
+      }
+    }
+
+    // The claim, as numbers. These are what the documents say right now, and the
+    // assertion is that at least four services have operations whose auth a
+    // generated client cannot see — which is what makes unconditional attachment
+    // the correct policy rather than merely the safe one.
+    const unseen = FLEET.filter((s) => {
+      const t = perOperation.get(s);
+      return t.declared === 0;
+    });
+
+    assert.ok(
+      unseen.length >= 4,
+      `only ${unseen.length} of six services have operations with no per-operation \`security\` ` +
+        `(${unseen.join(', ') || 'none'}). The unconditional-attachment rule in ` +
+        `src/cafaye/class.ts is justified by a measurement; if the fleet's documents started ` +
+        `expressing per-operation auth everywhere, this test is the thing that says so.`,
+    );
+
+    // And the inverse, because the rule has to be *safe* rather than merely
+    // convenient: at least one service must still declare per-operation security,
+    // or "ignore the arrays" would be indistinguishable from "the arrays are empty".
+    assert.ok(
+      FLEET.some((s) => perOperation.get(s).declared > 0),
+      'no service declares a per-operation `security` array anywhere. If the fleet ever ' +
+        'reaches that shape the generated transport may become usable directly, and this ' +
+        'test is the signal that the wrapper could stop doing this by hand.',
+    );
+  });
+
+  it('records the measurement in the failure message, by service', () => {
+    // `process.stderr` rather than an assertion: this is a report, and it is worth
+    // seeing on every run because the number is the evidence for a design decision
+    // someone will eventually ask about.
+    const lines = FLEET.map((s) => {
+      const t = perOperation.get(s);
+      return `    ${s.padEnd(9)} ${String(t.declared).padStart(2)} with per-operation security, ` +
+        `${String(t.empty).padStart(2)} declaring [], ${t.documentLevel ? 'document-level auth' : 'no document-level auth'}`;
+    });
+    process.stderr.write(`\n    auth as declared by the six documents:\n${lines.join('\n')}\n`);
+    // Nothing to assert beyond non-vacuity — the loop above already did that — but
+    // a report with zero lines is a report that printed nothing, and this catches it.
+    assert.equal(lines.length, FLEET.length);
   });
 });
 

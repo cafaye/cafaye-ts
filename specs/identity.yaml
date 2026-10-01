@@ -11,18 +11,48 @@ openapi: 3.1.0
 
 info:
   title: cafaye identity
-  # Bumped for the OIDC registration routes and again for the multi-factor
-  # routes. No path prefix moved and no existing response shape changed, so
-  # core's sync rule asks for exactly this: a non-breaking change bumps only the
-  # document version.
+  # Bumped for the OIDC registration routes, again for the multi-factor routes, and
+  # again for the scoped API tokens. No path prefix moved and no existing response
+  # shape changed, so core's sync rule asks for exactly this: a non-breaking change
+  # bumps only the document version.
   #
   # The 202 on POST /v1/session is the exception worth reading twice. It is a new
   # response on an existing operation, and an existing 200 client is unaffected by
   # it because 200 is still what an account with no second factor gets. A client
   # that only accepts 200 is broken the moment a user enrolls, which is precisely
   # the moment the client has to change.
-  version: 1.2.0
-  summary: Authentication, sessions, multi-factor authentication, accounts, tenancy and OIDC registrations.
+  #
+  # The scoped API tokens are additive in the same sense: four new operations, a
+  # second credential accepted by `bearerToken`, and one behaviour change on an
+  # EXISTING operation — `DELETE /v1/session` now answers 403 to a scoped token
+  # where it used to answer 204. A client that only ever presents session tokens
+  # cannot tell, and a client that had started pasting a `cafaye_` token into its
+  # logout call was being told a revocation had happened when none had.
+  #
+  # 1.4.0 is the admin surface: three new operations, all under a new `admin` tag,
+  # none of them changing an existing operation. It is additive for a second
+  # reason as well, which is worth stating because a client reading only the
+  # version would not see it: **the admin surface is token-only**, so `security`
+  # on these three operations lists `bearerToken` and NOT `sessionCookie`. That is
+  # a new kind of route in this document rather than a new route, and a client
+  # generating from it will get three methods that take no session where every
+  # other account route takes either.
+  #
+  # 1.5.0 is the recovery surface: eight new operations under a new `recovery`
+  # tag, and — unlike every bump before it — **one behaviour change on an existing
+  # surface**, which is stated here rather than left to be discovered:
+  # `DELETE /v1/session` and the other session-scoped operations are unaffected,
+  # but a client that renders "sign out" after a password change or an email change
+  # has to clear its own local state, because this service revokes every session
+  # the account held and mints nothing back. No response shape on an existing
+  # operation changed, and no path moved.
+  #
+  # Two properties of these eight operations are contract, not description, and a
+  # generated client inherits both: the three anonymous confirmation routes take a
+  # token where `security` is `[]` (the token IS the credential), and the two
+  # request routes return a `Accepted` body with exactly one field, ever.
+  version: 1.5.0
+  summary: Authentication, sessions, multi-factor authentication, account recovery, accounts, tenancy, scoped API tokens, the admin surface and OIDC registrations.
   description: |
     `identity` is the cafaye platform's security boundary: it is what every other
     service asks to identify a caller.
@@ -113,6 +143,28 @@ info:
     perimeter. `identity` has no platform-admin role yet — the admin API is a
     later packet — so the owner role is the one privilege this service already
     has that means "may change what can enter this account".
+
+    ## Scoped API tokens are a third credential, not a flag on either of the others
+
+    A **session** is browser-shaped and short-lived. An **OIDC access token** is a
+    JWT for a third party holding a browser, verified against a published JWKS
+    with no call back to here. A **scoped API token** is a first-party machine
+    credential: opaque, long-lived, revocable, and carrying a scope set.
+
+    Three of them because the three have genuinely different failure modes, and
+    running one through another's machinery would give each of them the wrong
+    one. A session that cannot be revoked instantly is a stolen browser; a JWT
+    that cannot be revoked before its `exp` is a fifteen-minute window and
+    nothing more; an opaque token that could not be revoked at all would be a
+    permanent credential, which is the one shape this service does not offer.
+
+    The property worth reading twice: **a token carries a scope set, not a role.**
+    Its authority is re-evaluated on every request against the owner's *current*
+    membership, so removing somebody from an account stops their tokens on the
+    next request — and a re-invitation does not bring them back, because the
+    removal also revoked what they held. That is the difference between a
+    credential and a permission, and it is why there is no `role` to edit on a
+    token.
   contact:
     name: identity
     url: https://github.com/cafaye/identity
@@ -147,6 +199,62 @@ tags:
     description: |
       OpenID Connect client registrations: the credentials products present at
       the token endpoint. The protocol surface itself is in `openid/openid.yaml`.
+  - name: api-keys
+    description: |
+      Scoped API tokens: the credential that is not a browser session, for a
+      script, a CI job or another service. Opaque, named, scoped, revocable, and
+      expiring — and **not** interchangeable with a session or with an OIDC access
+      token, which is why it is its own surface and not a flag on either of them.
+
+      A token carries a scope set, not a role. Its authority is re-evaluated on
+      every request from the owner's **current** membership, so removing somebody
+      from an account stops their tokens immediately, and a re-invitation does not
+      bring them back.
+  - name: admin
+    description: |
+      The admin surface: revoking pending invitations, and the immutable audit
+      trail recording that somebody did.
+
+      **Reachable by a scoped API token only — never by a browser session.** A
+      session is a browser credential, and an admin surface a session cookie opens
+      is an admin surface one CSRF away from being somebody else's. A token is the
+      right credential here for a second reason as well: every action on this
+      surface is recorded against the **api key's row id**, so a machine
+      credential is something an audit record can name and a session is not.
+
+      The privilege boundary, in one sentence: *an account admin may revoke pending
+      invitations to their own account and read that account's admin audit log —
+      authority over other people's pending access, and nothing else.*
+
+      A bulk revocation requires a `confirm` field and a named array, and a single
+      revocation requires neither. The difference is in the request shape, not in a
+      dialog, because a dialog is not something an API client has.
+  - name: recovery
+    description: |
+      The three flows a person can only finish by proving they can read an inbox:
+      resetting a password, verifying the account's address, and moving the account
+      to a new address.
+
+      They are one tag because they are one machine. Each mints a 256-bit random
+      value, stores nothing but its SHA-256, mails it, and spends it with a
+      conditional write that makes a second presentation a refusal — and a client
+      integrating one of them is integrating the other two's token lifecycle.
+
+      **Every route here refuses a scoped API token.** A credential that could
+      start an email change is a credential that can move an account's recovery
+      path, and a credential that could mint a password reset is a takeover with a
+      delay rather than a break-in. There is no scope in the machine vocabulary
+      for either, and there is not going to be one.
+
+      A reset token and a verification token are credentials, and the routes that
+      redeem them are anonymous: the token IS the authentication. They are 404 for
+      everything that is not a live token, including an expired one, a spent one,
+      and one minted for a different flow.
+
+      Absent entirely when `DATABASE_URL` is not configured, like every other
+      surface here. Mounted — and answering 503 on the paths that need to send —
+      when there is no mail delivery path, because a 404 would tell a product this
+      service has never heard of password recovery.
   - name: probes
     description: Liveness and readiness. Consumed by orchestrators, not by clients.
 
@@ -942,6 +1050,578 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /v1/password-resets:
+    post:
+      tags: [recovery]
+      operationId: requestPasswordReset
+      summary: Ask for a password-reset link
+      description: |
+        Mails a single-use link to the account's registered address, valid for 30
+        minutes.
+
+        **The response is the same for every address, and the body is a constant.**
+        A registered address, an unregistered one and an address inside the
+        one-minute cooldown all get `202 {"status":"accepted"}` with identical
+        bytes. This is the entire account-enumeration defence on this route, and it
+        is why `acceptedResponse` in the handler is a constant rather than a template
+        with a field that happens to render the same either way: a field is a field,
+        and the next person to add an `expires_at` to it reinstates the oracle
+        without touching a test.
+
+        The status is 202, not 200 and not 204. The request *was* accepted for
+        processing; whether the message is delivered is not something the caller is
+        entitled to learn before they have proved which account they are asking
+        about.
+
+        **A second request inside the cooldown sends nothing at all**, and answers
+        identically. It does not supersede the first link: a request route that
+        invalidated a live token would let anybody invalidate a victim's pending
+        reset, which is a denial of recovery dressed up as a convenience.
+
+        A cooldown is not a rate limiter, and this service does not have one here.
+        It bounds mail to one message per address per minute, which stops the
+        obvious abuse of an anonymous endpoint pointed at one victim. It does
+        nothing about a flood spread across a thousand addresses and is not
+        per-client. Per-source throttling belongs to courier, which is in the path
+        of every message this service sends.
+
+        Resetting revokes **sessions and OIDC access tokens** when the link is
+        redeemed, and **not** scoped API keys — the same rule the second-factor
+        removal already follows, and the reason is the same.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecoveryEmailRequest'
+            examples:
+              default:
+                summary: ask for a link
+                value:
+                  email: kaka@example.com
+      responses:
+        '202':
+          description: Accepted. Identical for every address.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Accepted'
+              example:
+                status: accepted
+        '400':
+          $ref: '#/components/responses/MalformedBody'
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/MailUnavailable'
+
+  /v1/password-resets/confirm:
+    post:
+      tags: [recovery]
+      operationId: confirmPasswordReset
+      summary: Spend a reset link and set a new password
+      description: |
+        Changes the password and revokes every session and every live OIDC access
+        token the account holds, in one transaction.
+
+        The revocation is why this is 204 and not a 200 with a session in it: the
+        caller's own session is revoked by the same write that changes the
+        password, so a caller that was signed in when it started is signed out when
+        it finishes and cannot use this route to keep itself signed in. **No session
+        is minted** — that would be a second way to turn a mailbox into a
+        credential without answering a second factor. Sign in again with the new
+        password.
+
+        The session cookie is cleared on the response as well as the row revoked, so
+        a browser is not left holding a credential this request just killed.
+
+        **404 for everything that is not a live token**: one that never existed, one
+        that expired, one already spent, and one minted for a different flow. It is
+        404 and not 401 because the caller is not asking who they are — they are
+        following a link, and "there is no such link" is also what they learn about
+        every link they did not receive.
+
+        Scoped API keys survive. This is the same rule `DELETE /v1/mfa` already
+        follows and the same reason: a key is a credential somebody deliberately
+        created and handed to a script, and a person who forgot their password is
+        not necessarily the person who owns it.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfirmPasswordResetRequest'
+            examples:
+              default:
+                summary: redeem the link
+                value:
+                  token: 0Kq3Zs1oQw7bXn0K9dLpR2vT4yE6hJ8cF1gM5nA2qU0
+                  password: a completely new password
+      responses:
+        '204':
+          description: |
+            The password changed and every session and access token was revoked.
+            No body.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+            Set-Cookie:
+              $ref: '#/components/headers/ClearedSessionCookie'
+        '400':
+          $ref: '#/components/responses/MalformedBody'
+        '404':
+          description: No live token matches — it never existed, expired, was spent, or belongs to another flow.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                type: https://errors.cafaye.com/not_found
+                title: Not found
+                status: 404
+                detail: no such link, or it has already been used
+                instance: /v1/password-resets/confirm
+                code: not_found
+                trace_id: 0af7651916cd43dd8448eb211c80319c
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/email-verifications:
+    post:
+      tags: [recovery]
+      operationId: requestEmailVerification
+      summary: Ask for a link that proves the account's address
+      description: |
+        Mails a link to the account's registered address, valid for 24 hours.
+
+        **The address is the one on the account, never one the request supplies.**
+        There is no `email` in the body that means "verify this address" — the body
+        carries the address to look the account up by, and what gets proved is the
+        address already stored on the row. A token that verified whatever address the
+        request carried would be a registration of somebody else's inbox.
+
+        Verification is not automatic at registration. `POST /v1/users` does not
+        send anything, and a client that wants an address proved calls this route
+        afterwards. That is one extra call in exchange for a registration that
+        cannot fail because a mail provider is down.
+
+        Same answer for every address, same constant body, same 202, and the same
+        one-minute cooldown that sends nothing rather than superseding a live link —
+        for the reasons on `requestPasswordReset`, which this route mirrors.
+
+        409 if the account's address is **already** verified. It is a 409 rather
+        than a silent 202 because a client rendering "check your inbox" on the
+        strength of a 202 it should never have been given tells a user to watch an
+        inbox nothing is going to arrive in.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecoveryEmailRequest'
+      responses:
+        '202':
+          description: Accepted. Identical for every address.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Accepted'
+              example:
+                status: accepted
+        '400':
+          $ref: '#/components/responses/MalformedBody'
+        '409':
+          description: This account's address is already verified, so there is nothing to prove.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                type: https://errors.cafaye.com/conflict
+                title: Conflict
+                status: 409
+                detail: this account's email address is already verified
+                instance: /v1/email-verifications
+                code: conflict
+                trace_id: 0af7651916cd43dd8448eb211c80319c
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/MailUnavailable'
+
+  /v1/email-verifications/confirm:
+    post:
+      tags: [recovery]
+      operationId: confirmEmailVerification
+      summary: Spend a verification link
+      description: |
+        Sets `email_verified_at` on the account and returns 204.
+
+        **It revokes nothing and mints nothing.** A verification is not a credential
+        — it is a fact about an address, and a link that sets a boolean changes no
+        secret. Ending every session over it would punish somebody for clicking a
+        link that proved who they already were, and minting a session here would be
+        a second way to turn a mailbox into a credential.
+
+        404 for every token that is not live, for the reasons on
+        `confirmPasswordReset`.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecoveryTokenRequest'
+            examples:
+              default:
+                summary: redeem the link
+                value:
+                  token: 0Kq3Zs1oQw7bXn0K9dLpR2vT4yE6hJ8cF1gM5nA2qU0
+      responses:
+        '204':
+          description: The address is now marked verified. No body.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+        '400':
+          $ref: '#/components/responses/MalformedBody'
+        '404':
+          description: No live token matches — it never existed, expired, was spent, or belongs to another flow.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                type: https://errors.cafaye.com/not_found
+                title: Not found
+                status: 404
+                detail: no such link, or it has already been used
+                instance: /v1/email-verifications/confirm
+                code: not_found
+                trace_id: 0af7651916cd43dd8448eb211c80319c
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/email-verification:
+    get:
+      tags: [recovery]
+      operationId: getEmailVerificationStatus
+      summary: Whether the caller's own address is proved
+      description: |
+        The caller's verification state, and nothing else.
+
+        **It is a separate route rather than a field on `GET /v1/me`**, and the
+        reason is a test: `/v1/me`'s projection is asserted field-by-field to be
+        exactly `id` and `email`, so adding `email_verified` there would either
+        break that invariant or weaken it. And "is this address proved" is not the
+        question "who am I" — a settings page asks the first, an app asks the
+        second.
+
+        `email_verified_at` is **absent** when the address has never been verified,
+        which is different from an epoch timestamp, and different again from
+        `email_verified: false` on an address that was proved and then changed:
+        changing an address clears the verification, so the two unverified states
+        are genuinely different and a client may want to tell them apart.
+
+        A `200` for every signed-in account, never a 404 for an unverified one: the
+        question has an answer for everybody, and a 404 would be indistinguishable
+        from "this is not your account".
+      security:
+        - sessionCookie: []
+      responses:
+        '200':
+          description: The caller's verification state.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VerificationStatus'
+              examples:
+                verified:
+                  summary: proved, at an instant
+                  value:
+                    email: kaka@example.com
+                    email_verified: true
+                    email_verified_at: '2026-09-30T12:10:00Z'
+                neverVerified:
+                  summary: never proved — no timestamp at all
+                  value:
+                    email: kaka@example.com
+                    email_verified: false
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/email-changes:
+    post:
+      tags: [recovery]
+      operationId: requestEmailChange
+      summary: Start a move to a new address
+      description: |
+        Records the intent and mails a link to the address the account has **now**.
+        Nothing moves yet: this creates the first of two tokens, and the second
+        does not exist until the first is redeemed.
+
+        That ordering is the whole of the hijack property. A stolen session can
+        reach this route, and what it produces is a link in the victim's inbox and
+        nowhere else — the attacker cannot advance the change, and the victim gets a
+        message saying their address is being changed, which is the only warning
+        they would otherwise get. A single-token design, where the link goes to the
+        NEW address and completing it moves the account, is a takeover on anybody
+        who can read the new inbox and nothing else.
+
+        **Session only.** There is no scope in the machine vocabulary for "may move
+        an account's recovery path", and there is not going to be one. A scoped API
+        token is refused on all eight routes of this surface.
+
+        Two refusals are worth reading, because both are the alternative being
+        rejected:
+
+        * **409** when the new address already has an account. This is the one
+          disclosure this surface makes and it is safe here — the caller is
+          authenticated as the person asking, and the alternative is a change that
+          fails at the last step after two emails and two clicks. It is the same
+          answer `POST /v1/users` gives.
+        * **422 `already_current`** when the new address is the one already on the
+          row. Refused rather than treated as a no-op, because a 202 here would
+          leave the caller believing a change had been requested and confirmed.
+
+        201 rather than 202: this is not a message being sent in the background, it
+        is a change that has been recorded and has a deadline.
+      security:
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecoveryEmailRequest'
+            examples:
+              default:
+                summary: move to a new address
+                value:
+                  email: new-address@example.com
+      responses:
+        '201':
+          description: The change is recorded and the first link is on its way to the current address.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmailChange'
+              example:
+                current_email: kaka@example.com
+                new_email: new-address@example.com
+                expires_at: '2026-10-02T12:00:00Z'
+        '400':
+          $ref: '#/components/responses/MalformedBody'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '409':
+          description: An account already exists for the new address.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                type: https://errors.cafaye.com/conflict
+                title: Conflict
+                status: 409
+                detail: an account already exists for that email address
+                instance: /v1/email-changes
+                code: conflict
+                trace_id: 0af7651916cd43dd8448eb211c80319c
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/MailUnavailable'
+
+  /v1/email-changes/current-address:
+    post:
+      tags: [recovery]
+      operationId: confirmEmailChangeCurrentAddress
+      summary: Prove control of the address the account has now
+      description: |
+        Spends the first token and mails the second one to the **new** address.
+        Answers 202 with the same constant body every other accepted route gives.
+
+        **The 202 body says nothing about the second link**, and that is the point.
+        The caller has just proved they can read the current inbox, so they know
+        they asked for this and know the next message goes to the address they
+        typed. Naming the destination here would tell a hijacked session — which can
+        reach this route with a token it does not have — nothing at all, while
+        telling a legitimate user nothing they need.
+
+        Presenting the second token here is a 404, not a partial success: the two
+        tokens are for different inboxes and a token that worked on the wrong side
+        would mean the wrong inbox proved something.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecoveryTokenRequest'
+      responses:
+        '202':
+          description: The current address is confirmed and the second link is on its way.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Accepted'
+              example:
+                status: accepted
+        '400':
+          $ref: '#/components/responses/MalformedBody'
+        '404':
+          description: No live first-half token matches.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                type: https://errors.cafaye.com/not_found
+                title: Not found
+                status: 404
+                detail: no such link, or it has already been used
+                instance: /v1/email-changes/current-address
+                code: not_found
+                trace_id: 0af7651916cd43dd8448eb211c80319c
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/MailUnavailable'
+
+  /v1/email-changes/new-address:
+    post:
+      tags: [recovery]
+      operationId: confirmEmailChangeNewAddress
+      summary: Complete a move to a new address
+      description: |
+        Spends the second token: the account's address moves, the verification is
+        cleared, and every session and every live OIDC access token is revoked — in
+        one transaction, with the session cookie cleared on the response.
+
+        **It is a 200 with a body rather than a 204**, because this route does
+        change three things the caller needs to know. A 204 would leave a client to
+        rediscover all three by making three other requests.
+
+        `email_verified` is **false**, and that is not a bug. Clicking a link proves
+        you can read an inbox, not that the new address belongs to this account,
+        and the write that moves the address clears `email_verified_at` in the same
+        statement. A client rendering "your address is updated" from this body is
+        correct; a client rendering "your address is verified" is not — prompt for
+        `POST /v1/email-verifications` instead, which now targets the new address.
+
+        Scoped API keys survive, for the reasons on `confirmPasswordReset`.
+
+        Presenting the first token here is a 404, for the same reason the other way
+        round is.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecoveryTokenRequest'
+      responses:
+        '200':
+          description: The address moved and every session and access token was revoked.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+            Set-Cookie:
+              $ref: '#/components/headers/ClearedSessionCookie'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmailChange'
+              example:
+                current_email: new-address@example.com
+                new_email: new-address@example.com
+                email_verified: false
+        '400':
+          $ref: '#/components/responses/MalformedBody'
+        '404':
+          description: No live second-half token matches.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                type: https://errors.cafaye.com/not_found
+                title: Not found
+                status: 404
+                detail: no such link, or it has already been used
+                instance: /v1/email-changes/new-address
+                code: not_found
+                trace_id: 0af7651916cd43dd8448eb211c80319c
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /v1/accounts/{account_id}/oidc-clients:
     parameters:
       - $ref: '#/components/parameters/AccountId'
@@ -1154,6 +1834,660 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /v1/accounts/{account_id}/api-keys:
+    parameters:
+      - $ref: '#/components/parameters/AccountId'
+    post:
+      tags: [api-keys]
+      operationId: mintAPIKey
+      summary: Mint a scoped API token
+      description: |
+        The credential that is not a browser session: a long-lived, named, scoped,
+        revocable token for a script, a CI job or another service.
+
+        **Owner only**, and the reason is a security property rather than a
+        convention. A machine credential outlives every session that made it and is
+        exactly what a stolen password buys an attacker, so "can read the member
+        list" is not authority to mint one — the same argument that makes
+        registering an OIDC client owner-only.
+
+        **The account comes from the path and the user from the session.** There is
+        no `account_id` or `user_id` in the body, and a body carrying either is a
+        422. A credential is minted BY the caller FOR the caller's own account; there
+        is no subject field, and a machine credential that can be minted for somebody
+        else is a way for an owner to plant a credential somebody did not choose to
+        hold.
+
+        **`token` is returned here and nowhere else, ever.** It is shown once, at
+        creation, and there is no endpoint that re-reads it — not because one is
+        missing but because there is nothing left to print: the row holds a SHA-256
+        of a 256-bit value. A caller that loses it mints another. It is never in a
+        cookie, because a credential in a cookie is one a browser silently attaches
+        to a request its holder did not intend, which is what core means by "no
+        cookies for API traffic".
+
+        **`expires_in` is SECONDS from now** — the same name and the same shape
+        RFC 6749's token response uses, so every OAuth client in the world already
+        knows what it means. Omit it for the default (90 days). `0` or a negative
+        value is a **422, not "never expires"**: a permanent credential is not
+        something this build offers, and the ceiling is 365 days. The cost of that
+        decision is real and is stated in README.md: a CI credential has to be
+        replaced every quarter, and what it buys is a moment at which a credential
+        nobody is using gets noticed.
+
+        **One live token per name per account.** A second live token answering to
+        this name is a 409, because "revoke ci-deploy" is otherwise ambiguous and an
+        operator picking the wrong one leaves a credential live they believe they
+        have destroyed. The constraint is on LIVE tokens only, so rotation is two
+        requests — revoke, then mint the same name — and not a transaction that has
+        to find a name free first.
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MintAPIKeyRequest'
+            examples:
+              aReadOnlyToken:
+                summary: A read-only token for a CI job
+                value:
+                  name: ci-deploy
+                  scopes: [accounts:read]
+              withALifetime:
+                summary: Naming how long it should live
+                value:
+                  name: nightly-import
+                  scopes: [accounts:read, accounts:write]
+                  expires_in: 2592000
+      responses:
+        '201':
+          description: |
+            The credential, and its secret. `token` is the only place it appears.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IssuedAPIKey'
+              example:
+                id: ab000000-0000-0000-0000-0000000000a1
+                name: ci-deploy
+                account_id: ab000000-0000-0000-0000-0000000000c1
+                user_id: ab000000-0000-0000-0000-0000000000u1
+                scopes: [accounts:read]
+                expires_at: '2026-12-29T12:00:00Z'
+                created_at: '2026-09-30T12:00:00Z'
+                token: cafaye_Zq3vK7mXpR2tY8wB4cN6dF0gH1jK5lM9oP3qS7uV2wX4yZ8
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: This account already has a live token with that name.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    get:
+      tags: [api-keys]
+      operationId: listAPIKeys
+      summary: List an account's API tokens
+      description: |
+        Every credential this account holds, newest first, **revoked ones
+        included** — a token that has been withdrawn is how a person finds out that
+        the credential they are about to revoke was withdrawn last Tuesday. An
+        account with none answers `[]` and not `null`.
+
+        **No secret, and no digest.** There is no column holding the plaintext, so
+        there is nothing for a response to leak; and the digest is of no use to a
+        client, so echoing the row's most sensitive column into a browser's network
+        log would be a cost with no benefit. `prefix` is not in this document at
+        all: a list distinguishes tokens by `name` and `id`, and a credential is
+        identified by its name or its id — never by a piece of itself.
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      responses:
+        '200':
+          description: The account's credentials.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/APIKey'
+              example:
+                - id: ab000000-0000-0000-0000-0000000000a1
+                  name: ci-deploy
+                  account_id: ab000000-0000-0000-0000-0000000000c1
+                  user_id: ab000000-0000-0000-0000-0000000000u1
+                  scopes: [accounts:read]
+                  expires_at: '2026-12-29T12:00:00Z'
+                  created_at: '2026-09-30T12:00:00Z'
+                  last_used_at: '2026-10-02T09:14:00Z'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/accounts/{account_id}/api-keys/{key_id}:
+    parameters:
+      - $ref: '#/components/parameters/AccountId'
+      - name: key_id
+        in: path
+        required: true
+        description: |
+          The credential's row id. A malformed one, one in another account and one
+          that never existed are all `404` — the same answer, so an id is not a way
+          to learn which credentials exist.
+        schema:
+          type: string
+          format: uuid
+    delete:
+      tags: [api-keys]
+      operationId: revokeAPIKey
+      summary: Revoke an API token
+      description: |
+        Withdraws a credential. It stops working on the very next request: the
+        resolution query filters on `revoked_at`, so there is no window.
+
+        **The row is kept, not deleted.** "Was this token revoked, or was it always
+        broken?" is a support question and a deleted row answers it for nobody. A
+        revoked row holds a digest of a secret nobody has, so keeping it is not a
+        risk.
+
+        A second revoke is a **409, not a 204**: an operator who clicked twice is
+        owed the truth, because a 204 the second time would leave them believing a
+        second live credential had just been destroyed.
+
+        `reason` is optional and is stored on the row. It is **not** in the
+        `identity.api_key.revoked` event: nobody typed it consistently, it is not a
+        fact about the credential, and a field whose values vary per operator is one
+        every consumer learns to ignore.
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RevokeAPIKeyRequest'
+            example:
+              reason: rotated
+      responses:
+        '204':
+          description: The credential no longer works.
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The credential was already revoked.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/accounts/{account_id}/admin/audit-log:
+    parameters:
+      - $ref: '#/components/parameters/AccountId'
+    get:
+      tags: [admin]
+      operationId: listAccountAuditLog
+      summary: Read an account's admin audit trail
+      description: |
+        Every admin action taken on this account, newest first, and **append-only**:
+        there is no operation in this API that edits or removes a record, and the
+        table itself refuses `UPDATE` and `DELETE` at the database.
+
+        ### Why the record cannot be edited, including by whoever performed it
+
+        Three independent reasons, in the order a reviewer asks about them:
+
+        1. **No route mutates it.** `GET` is the only method mounted on this path,
+           and a test walks the router to hold that — a check inside the handler
+           would pass even with a `DELETE` registered beside it.
+        2. **No service method updates or deletes it.** The store has `Append` and
+           `List` and nothing else.
+        3. **The database refuses it**, with a `BEFORE UPDATE OR DELETE` trigger.
+           This is the one that actually settles it: the first two only describe
+           this codebase, and a repair script, an operator with `psql`, or a future
+           packet all bypass Go entirely.
+
+        For the same reason the table carries **no foreign key to `accounts`**. A
+        cascade is a `DELETE`, so a cascading account deletion would be blocked —
+        and more to the point, allowing it would mean the shortest route from "an
+        admin did something questionable" to "there is no record of it" is one
+        request to `DELETE /v1/accounts/{account_id}`. The rows become unreachable
+        through the API and are retained for an operator reading the table directly.
+
+        ### An audit record names a credential, never a credential
+
+        `actor_user_id` and `actor_key_id` are **row ids**. There is no field in
+        the response that could hold a token, and that is structural rather than a
+        convention — the api key's digest is a field on the struct a handler holds,
+        and an audit log is exactly where a careless `fmt.Sprintf("%+v", …)` of it
+        would end up. A test walks the types that reach this table and fails if any
+        grows a field that could hold a value.
+
+        ### The page is bounded, and the bound is refused rather than clamped
+
+        `limit` defaults to 25 and is refused above 100. A request for more is a
+        **422, not a silent truncation**: a client that asked for 500 rows and
+        quietly received 100 has been told a lie about how much of the trail it has
+        read, and an operator building an export would produce a short one without
+        knowing.
+
+        `before` is an **opaque cursor**, returned as `next`. It is not an offset
+        and not a bare timestamp: it carries the row's `(occurred_at, id)` pair
+        encoded together, because a timestamp-only cursor silently drops every row
+        sharing the boundary instant — and this service's clock is a timestamp, not
+        a sequence, so two actions in the same second is the normal case. An
+        offset would be wrong the moment a row is appended between two requests,
+        which here is the normal case too: somebody is performing admin actions
+        while somebody else pages through the record of them.
+
+        A cursor this build did not issue is a **422 naming `before`**, not a
+        silent return to the first page — on a trail, "your token was wrong" and
+        "the records are missing" are very different conclusions.
+      security:
+        - bearerToken: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: |
+            Rows to return. Defaults to 25; refused above 100. `0` means the
+            default, so a generated client that sends its zero value still works.
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 100
+            default: 25
+        - name: before
+          in: query
+          required: false
+          description: |
+            The opaque `next` cursor from the previous page. Empty means the
+            newest page.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: One page of the account's admin audit trail, newest first.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditLogPage'
+              example:
+                entries:
+                  - id: ab000000-0000-0000-0000-0000000000d1
+                    action: invitation.revoked
+                    actor_user_id: ab000000-0000-0000-0000-0000000000u1
+                    actor_key_id: ab000000-0000-0000-0000-0000000000a1
+                    target: 4f2c0000-0000-4000-8000-00000000abcd
+                    affected: 1
+                    trace_id: 3f2b1a44-9c8e-4d1a-9f77-2b0c5e6a1d90
+                    occurred_at: '2026-09-30T12:00:00Z'
+                next: MiIyMDI2LTA5LTMwVDEyOjAwOjAwWiI2MTk3ZjItMTFlNi0zMWFhLTExYjhhMjM2ZmU2YzFlZA
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          description: |
+            Not an admin of this account, or the token does not carry
+            `audit_log:read`, or **a browser session was presented** — the admin
+            surface is token-only.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/accounts/{account_id}/admin/invitations/{invitation_id}:
+    parameters:
+      - $ref: '#/components/parameters/AccountId'
+      - name: invitation_id
+        in: path
+        required: true
+        description: |
+          The pending invitation's row id. A malformed one, one in another account,
+          one that never existed and one already redeemed are each answered the way
+          their cause requires, but a caller **cannot tell "no such invitation" from
+          "an invitation in an account you are not in"** — that would be a probe for
+          which invitation ids exist.
+        schema:
+          type: string
+          format: uuid
+    delete:
+      tags: [admin]
+      operationId: revokeAccountInvitation
+      summary: Revoke one pending invitation
+      description: |
+        Withdraws one pending invitation. The token stops redeeming it immediately,
+        and an audit record is written **in the same database transaction** as the
+        revocation — either both exist or neither does.
+
+        **Admin of the account, with `account_invitations:write`.**
+
+        ### No confirmation field, and that is the design
+
+        The URL names the one thing being changed, so the request is
+        self-describing: there is nothing in it that could be misread as "and
+        everything else". The bulk route requires `confirm: true` and a named
+        array; this one requires neither, and adding a `confirm` field here would
+        mean a client that forgot to send it gets a 422 on a safe, idempotent,
+        single-row operation.
+
+        ### Revoking is not deleting
+
+        The row is kept with `revoked_at` set, which is what lets
+        "was this revoked, or was it always broken?" be answered — the same support
+        question that keeps revoked api keys and OIDC clients rather than deleting
+        them. It also **frees the address to be invited again**, which is the point
+        of the operation: an admin who sent an invitation to the wrong list revokes
+        it and sends another, in two requests.
+
+        A **409** means the invitation is not in a revocable state — already
+        accepted (a membership already exists, and the question is where it came
+        from) or already revoked. A **404** is every other case, including an id
+        belonging to another account.
+      security:
+        - bearerToken: []
+      responses:
+        '204':
+          description: |
+            The invitation no longer redeems, and an audit record naming the
+            credential that did it exists in the same transaction.
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          description: |
+            Not an admin of this account, the token does not carry
+            `account_invitations:write`, or a browser session was presented.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The invitation was already accepted or already revoked.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/accounts/{account_id}/admin/invitation-revocations:
+    parameters:
+      - $ref: '#/components/parameters/AccountId'
+    post:
+      tags: [admin]
+      operationId: revokeAccountInvitations
+      summary: Revoke many pending invitations at once
+      description: |
+        Withdraws up to 50 pending invitations in one transaction, and writes **one**
+        audit record for the whole batch.
+
+        ### This is a different shape from the single route, on purpose
+
+        A bulk operation is where an off-by-one becomes an outage, so it does not
+        look like the single one:
+
+        | | single | bulk |
+        | --- | --- | --- |
+        | request | `DELETE …/invitations/{id}` | `POST …/invitation-revocations` with a body |
+        | confirmation | none needed — the URL names the one row | **`confirm: true` is required** |
+        | minimum role | admin | **owner** |
+
+        The `confirm` field is in the **body**, not a query parameter, so that the
+        request that performs the operation and the request that describes it are
+        the same bytes — a `?confirm=true` is one link-builder's accident away from
+        being sent without an operator reading it, and the array is exactly the thing
+        that must not be sent by accident. Absent, `false`, and the wrong JSON type
+        are all the same 422: a client that got a different answer for `false` than
+        for absent would have learned which one it sent.
+
+        **An unknown field is a 422**, so a client that misspells `confirm` as
+        `confirm_all` is told, rather than proceeding on the assumption it was
+        confirmed.
+
+        ### Why owner and not admin
+
+        Revoking one invitation is a decision about a person. Revoking every
+        pending one is a decision about the account, it is the operation a
+        departing employee's automation might fire on a schedule, and an owner is
+        the whole of the argument. There are only two roles above `member`, and the
+        smaller one already has the single-revocation route.
+
+        ### The bound is refused, not clamped
+
+        More than 50 ids is a **422**, not a truncation. A request naming a thousand
+        invitations that revoked the first fifty and reported nothing would be the
+        outage this route exists to make harder.
+
+        ### `requested` and `revoked` are both returned, and they differ
+
+        Ids that were already revoked, or that belong to another account, change no
+        rows, so `revoked` is frequently smaller than `requested`. Both numbers are
+        in the response because a client that cannot tell "you asked for four and
+        four went" from "you asked for four and two went" would report a completed
+        task over an incident.
+
+        **The count in the audit record is the number the database reported**, not
+        the length of the request — a request naming six ids where two were already
+        revoked records six, because six is the truth.
+      security:
+        - bearerToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BulkInvitationRevocation'
+            examples:
+              confirmed:
+                summary: The shape a bulk revocation must have
+                value:
+                  invitation_ids:
+                    - 4f2c0000-0000-4000-8000-00000000abcd
+                    - 4f2c0000-0000-4000-8000-00000000abce
+                  confirm: true
+              missingConfirmation:
+                summary: Refused — 422 naming `confirm`
+                value:
+                  invitation_ids:
+                    - 4f2c0000-0000-4000-8000-00000000abcd
+      responses:
+        '200':
+          description: |
+            The batch ran. `revoked` may be smaller than `requested`; both are
+            reported rather than reconciled.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BulkRevocationResult'
+              example:
+                requested: 2
+                revoked: 2
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          description: |
+            Not an **owner** of this account, the token does not carry
+            `account_invitations:write`, or a browser session was presented.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/introspections:
+    post:
+      tags: [api-keys]
+      operationId: introspectAPIKey
+      summary: Resolve a presented API token to its claims
+      description: |
+        Asks "what may this token do, and for which account". It exists because the
+        token is **opaque**: it is `cafaye_` plus 32 random bytes and the row holds
+        a SHA-256 of it, so there is no claim document inside it and no published
+        key set to verify it against. Asking identity is the only way a resource
+        server can learn a scope. The response is RFC 7662's shape.
+
+        The body takes the **credential, not an id** — an id would be an enumeration
+        oracle over somebody else's credentials, and a value is only useful to
+        somebody who already holds it.
+
+        ### An unusable token answers `{"active": false}` and nothing else
+
+        Unknown, revoked, expired, and one whose owner has been removed from the
+        account are all the same 200 with the same body, and the status is 200
+        rather than 404 because the endpoint succeeded — the answer is that the
+        token is not active. A caller who could tell those apart would learn whether
+        a leaked value was live, which is the second question an attacker asks after
+        "does this work".
+
+        ### The caller's own standing is a different question
+
+        It gets different statuses, because it is a different fact about the
+        request: **401** with no credential, and **403** for a token asking about
+        anybody else's. A token may introspect **itself**, which is the case a CI job
+        needs when it wants to know why it is being refused. A session may read a
+        token in an account it **owns**; a session that is not in the account is
+        404, for the reason every other route does that.
+
+        ### The two scope claim names
+
+        `scopes` and `scope` are **byte for byte identical**, and both are
+        space-separated strings.
+
+        This is a deliberate interim, not a contract. The fleet does not agree on the
+        name: core's `docs/openapi-conventions.md` requires `scopes`, and guard's
+        `src/middleware/jwt.ts` reads `scope` and splits it on whitespace. The
+        question is open (MD7 in the manager's `DECISIONS.md`) and answering it
+        unilaterally would mean rotating every credential already in a customer's
+        hand. Emitting both means whichever name wins, the other is a one-line
+        removal and no credential has to be reissued. A space-separated **string**
+        rather than an array because guard's verifier refuses a non-string claim.
+
+        ### `account_id` is required and there is no `sub` fallback
+
+        `sub` is the **user** the token names. `account_id` is the tenancy boundary
+        and it is always present; a token with no account cannot be used against any
+        account and is answered `{"active": false}`. Nothing here falls back to
+        `sub`, which would give a service-to-service token a user as its tenancy
+        key and turn a bug in one service into a cross-tenant read.
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IntrospectRequest'
+            example:
+              token: cafaye_Zq3vK7mXpR2tY8wB4cN6dF0gH1jK5lM9oP3qS7uV2wX4yZ8
+      responses:
+        '200':
+          description: |
+            The claim document, or `{"active": false}` when the token cannot be
+            used.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntrospectionResponse'
+              examples:
+                active:
+                  summary: A live token
+                  value:
+                    active: true
+                    sub: ab000000-0000-0000-0000-0000000000u1
+                    account_id: ab000000-0000-0000-0000-0000000000c1
+                    scopes: accounts:read accounts:write
+                    scope: accounts:read accounts:write
+                    jti: ab000000-0000-0000-0000-0000000000a1
+                    name: ci-deploy
+                    role: owner
+                    iat: 1788168000
+                    exp: 1790760000
+                inactive:
+                  summary: A token that cannot be used, for any reason
+                  value:
+                    active: false
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /healthz:
     get:
       tags: [probes]
@@ -1245,15 +2579,60 @@ components:
       type: http
       scheme: bearer
       description: |
-        The API surface. A session token from `POST /v1/session`, presented as
-        `Authorization: Bearer <token>`.
+        The API surface. **Two** credentials are accepted here and they are
+        distinguished by their shape, not by a flag:
 
-        Not a JWT, and deliberately so: core's conventions describe JWTs for
-        *service-to-service* traffic verified against identity's JWKS. These are
-        opaque server-side session tokens, looked up by the SHA-256 of the
-        presented value. Revocation is a row delete and takes effect on the next
-        request, which a self-contained JWT cannot do. The OIDC provider, and the
-        JWTs core describes, arrive with the OIDC packet.
+        * a **session token** from `POST /v1/session` — a browser credential, with
+          the full authority of its role.
+        * a **scoped API token** from `POST /v1/accounts/{account_id}/api-keys` —
+          `cafaye_` followed by 43 base64url characters. Narrowed by a scope set,
+          bound to one account, revocable, expiring.
+
+        The `cafaye_` prefix is what tells them apart, before any query runs, so a
+        value of one kind is never looked up in the other's table. A scoped token
+        is accepted on the account-scoped routes only, and only where its scope
+        allows; it is **refused with 403** on the session surface, the second
+        factor, the credential surface and the account collection routes.
+
+        A scoped token presented anywhere it is not accepted is 401, the same
+        answer as a session token that never existed — revoked, expired, and one
+        whose owner has been removed from the account are all that too.
+
+        ## Required scopes, per operation
+
+        | Operation | Scope | Enforced on |
+        |---|---|---|
+        | `getAccount`, `listMembers` | `accounts:read` | the tenancy reads |
+        | `renameAccount`, `inviteMember`, `changeMemberRole`, `removeMember` | `accounts:write` | the account's mutations except deleting it |
+        | `deleteAccount` | `accounts:delete` | `DELETE /v1/accounts/{account_id}` and nothing else |
+        | the four `oidc-clients` operations | `oidc_clients:write` | an account's OpenID Connect registrations |
+        | `mintAPIKey`, `revokeAPIKey`, `listAPIKeys` | *(none)* | **refused to every token**, with 403 |
+
+        Four names, a closed set, and every one of them is a capability an existing
+        route already enforces a different way. A scope for something this service
+        cannot do is a promise rather than a control.
+
+        The three collection operations — `listAccounts`, `createAccount`,
+        `acceptInvitation` — have **no scope and refuse every token**, and the reason
+        is not an oversight: each answers a question about the caller's *whole set*
+        of accounts, and a token is bound to one account. A CI job holding a token
+        for one tenant is not entitled to an inventory of every other tenant its
+        owner belongs to.
+
+        There is no scope for the second factor, for sessions, or for a wildcard
+        meaning "everything". A machine credential that can turn a second factor off
+        is a credential whose theft is a *downgrade* rather than a break-in, and
+        "read this account" and "delete this account" are two decisions a person
+        makes twice.
+
+        A **session** carries no scopes and is not refused for that. A session is a
+        human's credential with the full authority of its role; a token is a
+        narrowed one. That asymmetry is the whole difference between the two.
+      x-scopes:
+        - accounts:read
+        - accounts:write
+        - accounts:delete
+        - oidc_clients:write
 
   parameters:
     AccountId:
@@ -1279,8 +2658,426 @@ components:
         type: string
         maxLength: 200
       example: 0af7651916cd43dd8448eb211c80319c
+    ClearedSessionCookie:
+      description: |
+        An expired `__Host-session` cookie, with the same attributes that set it.
+
+        Sent by the two routes that revoke the caller's own session as a side
+        effect — `confirmPasswordReset` and `confirmEmailChangeNewAddress` — so a
+        browser is not left holding a credential the request it just made has
+        killed.
+      schema:
+        type: string
+      example: '__Host-session=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0'
 
   schemas:
+    APIKey:
+      type: object
+      description: |
+        A scoped API token as the settings page sees it.
+
+        **There is no `token` field here, and that is not an omission.** The
+        plaintext exists exactly once, in the `201` from
+        `POST /v1/accounts/{account_id}/api-keys`; there is no column holding it and
+        no endpoint that re-reads one. `IssuedAPIKey` below is the only shape with
+        that field, and it embeds this one — so the list handler cannot reach it even
+        by accident.
+
+        Nor is there a `token_digest`. It is of no use to a client, and echoing the
+        row's most sensitive column into a browser's network log would be a cost
+        with no benefit. A token is identified by its `name` or its `id`, and never
+        by a piece of itself — that is a rule for the logs this service writes as
+        much as for this response.
+      required: [id, name, account_id, user_id, scopes, expires_at, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: |
+            The row's own id. This is what a revoke names and what a test uses to
+            identify a credential.
+        name:
+          type: string
+          maxLength: 80
+          description: |
+            What a human calls this in a list. Required, because an operator revokes
+            by what they can read; a token nobody can tell apart from another is one
+            nobody remembers to revoke.
+        account_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+          description: |
+            The user who minted it, and the only subject it ever has. A credential
+            is minted BY the caller FOR the caller's own account.
+        scopes:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          description: |
+            The granted capabilities. An **array** here and not the
+            space-separated string of the claim document: this is a REST list, and
+            the claim form is the wire shape for something a resource server parses
+            out of a token. They are the same set.
+          items:
+            $ref: '#/components/schemas/APIKeyScope'
+        expires_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+          description: |
+            Absent when the token has never been presented. `omitempty` is doing
+            real work: "never used" and "used at the epoch" are different answers
+            and only the first is true.
+
+            Accurate to within five minutes, deliberately. A CI token at a thousand
+            requests a second must not put a thousand UPDATEs a second on one row,
+            and a single row's lock is a queue.
+        revoked_at:
+          type: string
+          format: date-time
+        revoke_reason:
+          type: string
+          maxLength: 200
+          description: |
+            Why it was withdrawn, when an operator gave a reason. Either a sentence
+            somebody typed, or the closed value `membership removed` that
+            `accounts.Service.RemoveMember` writes.
+
+    APIKeyScope:
+      type: string
+      description: |
+        One of four names, in core's `resource:action` shape. The set is closed and
+        adding one is a code change rather than a migration, which is why a token
+        holding a name this build does not know is refused at the point of use
+        rather than being treated as "and so anything goes".
+      enum:
+        - accounts:read
+        - accounts:write
+        - accounts:delete
+        - oidc_clients:write
+
+    IssuedAPIKey:
+      allOf:
+        - $ref: '#/components/schemas/APIKey'
+        - type: object
+          description: |
+            The create response, and the ONLY place a credential's plaintext
+            appears.
+          required: [token]
+          properties:
+            token:
+              type: string
+              description: |
+                The credential: `cafaye_` plus 43 base64url characters. Shown once,
+                here, and unrecoverable afterwards — not because an endpoint is
+                missing but because the row holds a SHA-256 of a 256-bit value.
+                A caller that loses it mints another.
+
+                The prefix is a feature and the feature is recognition: a secret
+                that leaks into a CI log, a shell history or a support ticket is
+                recognised as a cafaye credential by its first seven characters,
+                which turns "somebody has to work out which of these strings is
+                working" into a grep.
+
+    BulkInvitationRevocation:
+      type: object
+      description: |
+        **Both fields are required, and neither is optional.** `confirm` is the
+        whole of the difference between this route and the single-revocation route,
+        and an array with no confirmation is exactly the request that revokes every
+        pending invitation by accident.
+
+        An unknown field is a 422, so a client misspelling `confirm` is told rather
+        than proceeding.
+      required: [invitation_ids, confirm]
+      additionalProperties: false
+      properties:
+        invitation_ids:
+          type: array
+          minItems: 1
+          maxItems: 50
+          description: |
+            The pending invitations to revoke, as row ids. **At most 50** — a larger
+            request is a 422 rather than a truncation, because a request naming a
+            thousand invitations that silently revoked the first fifty is the outage
+            this route exists to make harder.
+
+            Ids that are already revoked, already accepted, or belong to another
+            account are not an error: they change no rows and are not counted in
+            `revoked`. That is why the response reports both counts.
+          items:
+            type: string
+            format: uuid
+        confirm:
+          type: boolean
+          const: true
+          description: |
+            Must be `true`. `false` is the same answer as absent — a 422 naming
+            `confirm` — so a client cannot learn from the response which value it
+            sent.
+          example: true
+
+    BulkRevocationResult:
+      type: object
+      description: |
+        `requested` is what the request named and `revoked` is what the database
+        changed, and they are frequently different. Both are reported rather than
+        reconciled, because a client that cannot tell "you asked for four and four
+        went" from "you asked for four and two went" would report a completed task
+        over an incident.
+      required: [requested, revoked]
+      properties:
+        requested:
+          type: integer
+          minimum: 1
+          maximum: 50
+          description: How many invitation ids the request named, after de-duplication.
+        revoked:
+          type: integer
+          minimum: 0
+          maximum: 50
+          description: |
+            How many pending invitations the database actually changed. **This is
+            also the number in the audit record** — the one the mutation reported,
+            not the length of the request.
+
+    AuditLogPage:
+      type: object
+      description: |
+        One bounded page of the account's admin audit trail, newest first.
+      required: [entries]
+      properties:
+        entries:
+          type: array
+          description: |
+            Present and empty when there is nothing, rather than omitted: "no
+            entries" and "the server left the field out" are different answers and
+            a client that has to tell them apart will eventually get it wrong.
+          items:
+            $ref: '#/components/schemas/AuditLogEntry'
+        next:
+          type: string
+          description: |
+            The opaque cursor for the following page, **absent on the last page**.
+
+            It encodes the last row's `(occurred_at, id)` pair together and is
+            passed back verbatim in `before`. It is not an offset, and it is not a
+            bare timestamp: a timestamp-only cursor drops every record sharing the
+            boundary instant, and this service's clock is a timestamp rather than a
+            sequence, so two admin actions in the same second is the normal case.
+          example: MiIyMDI2LTA5LTMwVDEyOjAwOjAwWiI2MTk3ZjItMTFlNi0zMWFhLTExYjhhMjM2ZmU2YzFlZA
+
+    AuditLogEntry:
+      type: object
+      description: |
+        One admin action.
+
+        **There is no field here that could hold a credential, and that is
+        structural rather than a convention.** `actor_user_id` and `actor_key_id`
+        are row ids. The api key's digest is a field on the struct a handler holds,
+        and an audit log is exactly where a careless `fmt.Sprintf("%+v", …)` of it
+        would end up — so a test walks the types that reach this table and fails if
+        any of them grows a field that could hold a value.
+
+        An operator copies this response into an incident ticket, and a response
+        shape with a `token` field is one somebody will eventually populate.
+      required: [id, action, actor_user_id, actor_key_id, target, affected, trace_id, occurred_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: The record's own id.
+        action:
+          type: string
+          enum: [invitation.revoked, invitations.revoked]
+          description: |
+            What was done, from a closed set validated in Go rather than by a
+            schema CHECK — a closed vocabulary is a code fact, and putting it in
+            the schema would make adding an action a migration.
+
+            The two names are distinct because the two are different events: one
+            invitation revoked is a decision about a person, and a hundred at once
+            is a decision about the account. Collapsing them would lose the answer
+            an operator is asking for — "was that one, or was that all of them".
+        actor_user_id:
+          type: string
+          format: uuid
+          description: The human the acting token was minted for.
+        actor_key_id:
+          type: string
+          format: uuid
+          description: |
+            **Which** token acted — the row's id, never its value. "Somebody in the
+            account" is not an answer an incident review can use, and this is the id
+            an operator revokes by.
+        target:
+          type: string
+          maxLength: 64
+          description: |
+            A short label for what was acted on: an invitation id for the single
+            route, `invitation-revocations` for the bulk one. A label and not a
+            list, so one record stays one record however large the request was.
+        affected:
+          type: integer
+          minimum: 0
+          description: |
+            How many rows the action changed — the number the mutation reported, not
+            the length of the request. `0` on the bulk route means every named
+            invitation was already in a non-revocable state, and the response's
+            `revoked` count says so too.
+        trace_id:
+          type: string
+          description: |
+            The request's trace id, which is also the `X-Trace-Id` response header
+            and the `trace_id` in the problem document if the action failed. This
+            joins an audit record to a log line without either carrying a timestamp
+            comparison. Never a credential.
+        occurred_at:
+          type: string
+          format: date-time
+          description: When the action happened, from the service's clock.
+
+    MintAPIKeyRequest:
+      type: object
+      description: |
+        **The account and the user are not here.** They come from the path and the
+        session, and a body carrying `account_id` or `user_id` is a 422 — because a
+        body that could carry them is a body where they are ambiguous.
+      required: [name, scopes]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: |
+            Trimmed, and refused if it holds a control character: a name lands in a
+            log line, a settings page and an incident report, and one carrying a
+            newline is three lines where somebody wrote one.
+        scopes:
+          type: array
+          minItems: 1
+          maxItems: 8
+          description: |
+            Required, and refused rather than defaulted. A token with no scopes is a
+            session that never expires, and it arrives as "the client did not send
+            the field" — which is exactly how the dangerous case looks.
+
+            An unsupported scope is a 422 naming the field, not a silent drop: a CI
+            job that asked for `accounts:admin` and silently received
+            `accounts:read` runs for a week and fails on the write it was written
+            to do.
+          items:
+            $ref: '#/components/schemas/APIKeyScope'
+        expires_in:
+          type: integer
+          format: int64
+          minimum: 1
+          description: |
+            **Seconds from now**, the same name and shape RFC 6749's token response
+            uses. Omit it for the 90-day default. `0` and negative values are 422:
+            a permanent credential is not something this build offers, and the
+            ceiling is 365 days.
+
+    RevokeAPIKeyRequest:
+      type: object
+      description: |
+        Optional in the strongest sense — a `DELETE` with no body at all is a
+        revoke, because "revoke this" with no explanation is the common request and
+        refusing it for want of a JSON document would be a 400 on a DELETE that needs
+        nothing else.
+      additionalProperties: false
+      properties:
+        reason:
+          type: string
+          maxLength: 200
+
+    IntrospectRequest:
+      type: object
+      description: |
+        The **credential**, not an id. An id would be an enumeration oracle over
+        somebody else's credentials, and a value is only useful to somebody who
+        already holds it.
+      required: [token]
+      additionalProperties: false
+      properties:
+        token:
+          type: string
+          description: The presented value, prefix and all.
+
+    IntrospectionResponse:
+      type: object
+      description: |
+        RFC 7662's shape. When `active` is false this object is **exactly**
+        `{"active": false}` and carries nothing else — a `sub` on an inactive
+        document is a user id handed to whoever asked, and a refusal that differs
+        per reason is an oracle for whether a leaked value was live.
+      required: [active]
+      properties:
+        active:
+          type: boolean
+        sub:
+          type: string
+          format: uuid
+          description: |
+            The **user** the token names. It is not the tenancy key, and nothing in
+            this document falls back to it.
+        account_id:
+          type: string
+          format: uuid
+          description: |
+            The tenancy boundary, and **required** on an active document. core's
+            rule is that every query is scoped by `account_id` from the token and
+            never from the request body; a token with no account cannot be used
+            against any account and is answered `{"active": false}`.
+        scopes:
+          type: string
+          description: |
+            The capability set as a **space-separated string** — core's required
+            claim name.
+        scope:
+          type: string
+          description: |
+            An **exact mirror of `scopes`**, and the name `guard` reads. Both are
+            emitted because the fleet has not agreed on one (MD7, open) and
+            answering it here would mean rotating every credential already in a
+            customer's hand. Whichever name wins, the other is a one-line removal
+            and no credential has to be reissued. **Two names is not a contract.**
+        jti:
+          type: string
+          format: uuid
+          description: The credential's row id, which is what a consumer correlates on.
+        name:
+          type: string
+          description: What a human would call this credential.
+        role:
+          type: string
+          description: |
+            The owner's **live** membership role, read at the instant of the claim
+            rather than snapshotted at issue.
+
+            It is here for an operator reading the response, and it is **not** an
+            authorization input: core's rule is that services check scopes and ask
+            identity, and a role in a claim is a role a service might start
+            branching on.
+        iat:
+          type: integer
+          format: int64
+        exp:
+          type: integer
+          format: int64
+        last_used_at:
+          type: integer
+          format: int64
+
     User:
       type: object
       description: |
@@ -1822,6 +3619,167 @@ components:
             back from storage, because a client rendering "you now have N codes"
             wants N and not a round trip to learn it.
 
+    RecoveryEmailRequest:
+      type: object
+      description: |
+        An address to look an account up by, on the three routes that start a
+        flow.
+
+        **It is never the address that gets proved or moved.** On
+        `requestEmailVerification` it identifies the account whose *stored* address
+        is proved, and on `requestEmailChange` it is the address being moved TO.
+        A token that verified whatever address this field carried would be a
+        registration of somebody else's inbox.
+      additionalProperties: false
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 320
+          description: Normalized to lower case and trimmed before comparison.
+
+    RecoveryTokenRequest:
+      type: object
+      description: |
+        A single-use token from an emailed link. It is one field on purpose, and
+        the three routes that take it do not all accept the same set: a shared type
+        with an optional `password` would invite a client to send a password to a
+        verification endpoint, where it would be ignored — and "ignored" is a worse
+        answer than "refused", because a caller that believed the field was
+        accepted would not know to retry.
+
+        **The token is the credential.** These routes are anonymous, so the only
+        thing being authenticated is the value in this field.
+      additionalProperties: false
+      required: [token]
+      properties:
+        token:
+          type: string
+          minLength: 43
+          maxLength: 43
+          description: |
+            256 bits from crypto/rand, base64url without padding. Only its SHA-256
+            is stored, so a database dump yields no usable credential.
+
+            43 characters, and the length is load-bearing on the client side rather
+            than incidental: it is what tells a caller the value is complete before
+            it is pasted into a URL.
+
+    ConfirmPasswordResetRequest:
+      type: object
+      additionalProperties: false
+      required: [token, password]
+      properties:
+        token:
+          type: string
+          minLength: 43
+          maxLength: 43
+          description: The token from the emailed link. See `RecoveryTokenRequest`.
+        password:
+          type: string
+          minLength: 8
+          maxLength: 1024
+          description: |
+            The same rules and the same argon2id hashing a registration uses, and
+            enforced identically. A new password is not an excuse to accept one
+            that registration would have refused.
+
+            The upper bound is a DoS control on an unauthenticated route: argon2id's
+            cost is fixed in memory but its input is not, so without it a caller
+            with no session chooses the size of the hashing work.
+
+    Accepted:
+      type: object
+      description: |
+        The body of every route that has been asked to send a message.
+
+        **Exactly one field, with one value, ever.** That is the whole of the
+        account-enumeration defence on `requestPasswordReset`,
+        `requestEmailVerification` and `confirmEmailChangeCurrentAddress`: a
+        registered address, an unregistered one and an address inside the cooldown
+        all get these same bytes. Adding an `expires_at`, an `email` or a `sent`
+        boolean here would reinstate an oracle without touching a test, so the
+        handler's type is a constant for the same reason.
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [accepted]
+          example: accepted
+
+    VerificationStatus:
+      type: object
+      description: |
+        Whether one address is proved, as `GET /v1/email-verification` reports it.
+
+        The boolean and the timestamp say the same thing in two shapes and both are
+        present because a client needs one and not the other: a boolean for a
+        conditional render, an instant for "verified on". The timestamp is
+        **absent** rather than null when the address was never verified — "never
+        verified" and "verified at the epoch" are different answers and only the
+        first is true.
+      additionalProperties: false
+      required: [email, email_verified]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 320
+          description: The address on the account. Always lower case.
+        email_verified:
+          type: boolean
+          description: |
+            False both for an address that was never proved AND for one that was
+            proved and then moved — a changed address lands unverified.
+        email_verified_at:
+          type: string
+          format: date-time
+          description: |
+            RFC3339 UTC, absent when `email_verified` is false. Judged against the
+            service's clock, not the database's.
+
+    EmailChange:
+      type: object
+      description: |
+        The state of a two-sided address change.
+
+        **Both addresses are named** and neither is secret: `current_email` is the
+        address the account has now and `new_email` is the one that was typed. What
+        it does not carry is a token, a digest or a row id — this flow is addressed
+        by its tokens, and there is no id in it for a client to hold.
+
+        On the `200` from `confirmEmailChangeNewAddress` the move has completed, so
+        `current_email` and `new_email` are the same value, `expires_at` is absent,
+        and `email_verified` is present and **false**.
+      additionalProperties: false
+      required: [current_email, new_email]
+      properties:
+        current_email:
+          type: string
+          format: email
+          maxLength: 320
+        new_email:
+          type: string
+          format: email
+          maxLength: 320
+        expires_at:
+          type: string
+          format: date-time
+          description: |
+            The deadline for the change. 24 hours from the request, and **both
+            halves share it** rather than each getting its own clock — a change
+            cannot be kept alive indefinitely by confirming the first half over and
+            over. Absent once the move has completed.
+        email_verified:
+          type: boolean
+          description: |
+            Present only on the `200` from `confirmEmailChangeNewAddress`, where it
+            is always false. An email change CLEARS the verification, so a client
+            that reads this has to prompt for a fresh one rather than assuming the
+            address it just moved to is proved.
+
     Problem:
       type: object
       description: |
@@ -1907,6 +3865,37 @@ components:
           description: The dependencies probed, comma separated, or `none`. Present on `/readyz` only.
 
   responses:
+    MailUnavailable:
+      description: |
+        This deployment has no mail delivery path, so it cannot send that link.
+
+        A 503 and not a 500, because the caller can act on it: a product that sees
+        this knows not to render "check your inbox", which is the whole reason it
+        is not an opaque server error. And a 503 and not a 404, for the same reason
+        `POST /v1/session/mfa` answers 503 — a 404 would say this service has never
+        heard of password recovery, which is the one answer that is both false and
+        useless.
+
+        **It is checked before the address is looked up**, so a deployment that
+        cannot send refuses a request for a registered address and one for an
+        unregistered one in the same place. Without that ordering "503 against 202"
+        would be an account-existence oracle, and it would be the most expensive one
+        in this service to discover.
+      headers:
+        X-Trace-Id:
+          $ref: '#/components/headers/TraceId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://errors.cafaye.com/service_unavailable
+            title: Service unavailable
+            status: 503
+            detail: this deployment cannot send email, so it cannot send that link
+            instance: /v1/password-resets
+            code: service_unavailable
+            trace_id: 0af7651916cd43dd8448eb211c80319c
     Unauthenticated:
       description: |
         No usable credential: none was presented, or it is unknown, expired or
@@ -2112,7 +4101,7 @@ components:
 #    `validation_failed` at 400, since core's list is keyed by slug and one slug
 #    cannot carry two statuses.
 #
-# 3. `info.version` is set, and it is at 1.2.0.
+# 3. `info.version` is set, and it is at 1.3.0.
 #
 #    core's versioning section carries an open decision (D4) about whether a
 #    document version is required alongside the `/v1` path prefix, precisely
@@ -2144,10 +4133,27 @@ components:
 #
 #  * The `bearerToken` scheme is `http`/`bearer` with an opaque token, not a JWT.
 #    core's auth section describes JWTs for service-to-service traffic verified
-#    against identity's JWKS. These are server-side session tokens: revocation is a
-#    row delete that takes effect on the next request, which a self-contained JWT
-#    cannot do. The OIDC provider DOES issue JWTs, and those are verified against
-#    the JWKS in `openid/openid.yaml`.
+#    against identity's JWKS. BOTH credentials this scheme now accepts are
+#    server-side row lookups: a session token and a scoped API token. Revocation is
+#    a row write that takes effect on the next request, which a self-contained JWT
+#    cannot do — and for a credential that lives a quarter rather than fifteen
+#    minutes, that is the property worth having. The OIDC provider DOES issue JWTs,
+#    and those are verified against the JWKS in `openid/openid.yaml`.
+#  * A scoped API token is served by an **introspection endpoint on this
+#    `/v1` surface**, not through the OIDC one, and the path is RFC 7662's *response*
+#    shape rather than its `/introspect` path. The reason is that the credential is
+#    first-party and opaque: there is no access token to introspect in the OAuth
+#    sense, and `oidc.SetIntrospectionFromToken` still refuses. The OIDC
+#    provider's introspection is a separate, unmounted feature for JWT access
+#    tokens. If core decides an introspection path is fixed, this is the row that
+#    has to change.
+#  * Two decisions in this document are interim and marked as such: the **dual
+#    scope claim** on the introspection response (`scopes` and `scope`, byte for
+#    byte equal, pending MD7) and the **`account_id` floor with no `sub` fallback**.
+#    Both are recorded where a consumer will read them rather than only in a
+#    changelog, because a client integrating against the dual claim needs to know
+#    that one of the two names is going away and that nothing has to be reissued
+#    when it does.
 #  * `POST /v1/session/mfa` is on the `sessions` tag, not the `mfa` one, and it is
 #    mounted even in a deployment with no `MFA_ENCRYPTION_KEY`. It is the rest of
 #    the login, it lives with the login, and it answers `503` rather than being

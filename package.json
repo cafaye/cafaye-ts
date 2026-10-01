@@ -32,6 +32,7 @@
   "scripts": {
     "generate": "node scripts/generate.mjs",
     "vendor": "node scripts/vendor.mjs",
+    "e2e:identity": "node scripts/e2e-identity.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --test --test-concurrency=1 \"test/**/*.test.mjs\"",
     "verify:specs": "node scripts/verify-specs.mjs",

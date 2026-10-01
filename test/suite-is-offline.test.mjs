@@ -88,12 +88,49 @@ const FORBIDDEN = [
       'file exists to catch, in the shape it usually takes',
   },
   {
-    pattern: /git[^'"\n]*\b(clone|pull|ls-remote)\b/,
+    // `\bgit\b` and NOT `git`, and this is the THIRD narrowing of a rule in this
+    // file, so the reason is the generalisation rather than the instance.
+    //
+    // It fired on `test/spec-drift.test.mjs`, on a comment reading "a CI job
+    // legitimately holds an HTTPS clone of the same repository" — because
+    // `git` with no left boundary matches inside "legitimately". The rule was
+    // catching the word *legitimately*, not a subcommand. The prose was correct
+    // and rewording it would be the third time this file's own header predicted:
+    // "A check broad enough to catch the documentation of a rule is a check that
+    // eventually gets disabled."
+    //
+    // THE OTHER HALF OF THE FIX IS WIDER, not narrower, and it is the more
+    // important half. The rule used to exclude quotes between `git` and the
+    // subcommand, which is what stops a rule spanning statements — and in doing
+    // so it MISSED the most likely shape of the thing it forbids:
+    //
+    //     execFileSync("git", ["clone", url, dir])
+    //
+    // The quotes sit between `git` and `clone`, so both this rule and the one
+    // before it reported that line clean. That is a hole in a tripwire whose
+    // entire job is catching that line, and it was found while narrowing the
+    // same pattern — so `[^'"\n]` becomes `[^\n]`. The newline exclusion stays,
+    // because a rule that spans lines is a rule that fires on unrelated prose
+    // somewhere else in the file, and one of those is a disabled check.
+    pattern: /\bgit\b[^\n]*\b(clone|pull|ls-remote)\b/,
     what: 'runs a git subcommand that contacts a remote',
     why: 'clone, pull and ls-remote all require a reachable remote',
   },
   {
-    pattern: /\bremote\s+(get-url|add|set-url)\b/,
+    // TWO spellings, because this guard has now caught one rewrite of itself.
+    //
+    // The rule used to name only the subcommand form (`git remote get-url
+    // origin`), which is what `scripts/vendor.mjs` used to call. cafaye-ts-01b
+    // rewrote it to `git config --get remote.origin.url` — the same read, a
+    // different spelling, done for an unrelated reason — and the rule reported the
+    // rewrite clean. It was caught by the self-test above and not by the tripwire,
+    // which is exactly the failure the self-test exists to find: a guard with one
+    // spelling of what it forbids.
+    //
+    // `remote.<name>.<key>` is the config form. The subcommand alternation stays
+    // because `git remote add` and `git remote set-url` rewrite config without
+    // naming it in that shape.
+    pattern: /\bremote\s+(get-url|add|set-url|rm)\b|\bremote\.[a-z0-9_-]+\.(url|pushurl|fetch)\b/,
     what: 'inspects or rewrites git remotes',
     why: 'reading a local remote URL is harmless, but the habit it belongs to is not',
   },
@@ -110,6 +147,78 @@ describe('the test suite is offline', () => {
         `properties each need a test; if this fails, some were never written.`,
     );
     assert.ok(files.includes(SELF));
+  });
+
+  it('catches the shapes of each rule it was written to catch', () => {
+    // THE RULE THAT PROVES THE RULES. Every entry in `FORBIDDEN` above is a claim
+    // about what cannot appear in a test file, and a claim that is only ever
+    // exercised by the ABSENCE of an offender is not verified at all — it is a
+    // sentence. Three of these patterns have been changed in this file's history,
+    // two narrowed and one widened, and all three changes were made by reading the
+    // code rather than by being told a test failed. A rule that quietly stops
+    // matching is invisible until the thing it guards is done, which is the worst
+    // time to find out.
+    //
+    // Each line below is a snippet in the shape a violation actually takes, and
+    // each is asserted CAUGHT. The second group is the other half: prose the rules
+    // must NOT fire on, because a check that catches its own documentation is a
+    // check that eventually gets disabled.
+    const MUST_CATCH = [
+      // The shape `scripts/lib/workspace.mjs` uses, and the one the git rule
+      // missed until cafaye-ts-01b: quoted arguments between `git` and the
+      // subcommand.
+      `await execFileAsync('git', ['clone', url, dir]);`,
+      `const { stdout } = await execFileAsync("git", ["clone", remote, dest]);`,
+      `execFileSync("git", ["pull", "--rebase"]);`,
+      `run("git", "ls-remote", origin);`,
+      `await git(checkout, ['clone', '--depth', '1', remote]);`,
+      // Bare forms, for completeness.
+      `git clone --depth 1 https://example.com/x`,
+      `git pull --rebase`,
+      `git -C ../identity ls-remote origin`,
+      `await import('node:child_process').then(m => m.exec('git clone'))`,
+      `fetch('https://github.com/cafaye/identity/raw/main/openapi/v1.yaml');`,
+      `import { vendor } from '../scripts/vendor.mjs';`,
+      `require('../scripts/vendor.mjs');`,
+      `git config --get remote.origin.url`,
+      `execFileAsync('git', ['config', '--get', 'remote.origin.url'])`,
+      `await x('https://example.com/openapi/v1.yaml');`,
+      `remote get-url origin`,
+      `git remote set-url origin https://example.com/x.git`,
+      `git remote add upstream https://example.com/x.git`,
+    ];
+
+    for (const line of MUST_CATCH) {
+      const rule = FORBIDDEN.find(({ pattern }) => pattern.test(line));
+      assert.ok(
+        rule,
+        `no rule in this file matches a violation in its real shape:\n  ${line}\n` +
+          `A tripwire that cannot fire is a comment. Add a pattern or widen an ` +
+          `existing one — and never narrow one to make an assertion pass.`,
+      );
+    }
+
+    const MUST_NOT_CATCH = [
+      // The false positives that actually happened. "legitimately" contains "git",
+      // and the first version of that rule matched it.
+      `// a CI job legitimately holds an HTTPS clone of the same repository`,
+      `// .gitignore is never stopped here`,
+      `// the file was vendored from a clone at the recorded sha`,
+      // The rules' own documentation, which must not be its own evidence.
+      `// clone, pull and ls-remote all require a reachable remote`,
+      `// package-contents.test.mjs names scripts/vendor.mjs in a comment`,
+      `// https://identity.example.com is a base URL, never fetched`,
+    ];
+
+    for (const line of MUST_NOT_CATCH) {
+      const rule = FORBIDDEN.find(({ pattern }) => pattern.test(line));
+      assert.equal(
+        rule,
+        undefined,
+        `a rule fires on prose it must not catch, which would fail every test file ` +
+          `that explains itself:\n  ${line}\n  matched ${rule?.what}`,
+      );
+    }
   });
 
   for (const { pattern, what, why } of FORBIDDEN) {

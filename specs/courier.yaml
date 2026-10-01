@@ -14,27 +14,259 @@
 # prevents from recurring. They are the other half of the public surface, not an
 # afterthought, and they are documented as thoroughly as the webhooks.
 #
-# > DECISION NEEDED (courier-05): the two notification-preferences operations are
-# > served **unauthenticated**, and this document says so with `security: []`
-# > rather than claiming a scheme courier does not enforce. `router.ex` puts them
-# > in the `:api` pipeline only, and the gap is recorded in
-# > `CourierWeb.NotificationPreferencesController`'s moduledoc and pinned by
-# > `test/courier_web/router_test.exs`. Core's conventions ask for required
-# > scopes on every operation, so either courier authenticates them or the
-# > convention needs an exception for per-user settings whose tenant is in the
-# > path. Recommendation: authenticate them in a later packet, before a customer
-# > integrates against this document — a generated client built from `security:
-# > []` will send no token, so closing it later is a breaking change to the
-# > contract. Cost of flipping now: one scope name and the plug in a scope block.
-# > Cost of flipping later: a major `info.version` and every generated client.
+# > **Every operation in this document is authenticated, and exactly one of them
+# > is authenticated by a SIGNATURE rather than by a token.** That one is
+# > `receiveResendReport`, and it is the first operation in this file that is not
+# > behind `CourierWeb.Plugs.Principal`. The paragraph above used to say "every
+# > operation in this document is authenticated" with no exception, and it was
+# > true — which is precisely why it needed replacing rather than extending: a
+# > blanket claim is the shape that hides the first exception.
+# >
+# > It is an exception because an inbound provider webhook is not a tenant
+# > operation. Resend signs its webhook with Svix and sends no bearer token, so a
+# > principal would answer every delivery with a `401`; and behind no plug at all
+# > it would be an unauthenticated `POST` that records suppressions, which is a
+# > denial of service on the whole product delivered by the feature meant to
+# > prevent it. Core settles it, in `docs/openapi-conventions.md` §Auth: "Inbound
+# > webhooks are **not** JWT-authenticated: they are signed, per the sender's
+# > convention, and the receiver checks the signature before parsing." So the
+# > operation declares `security: [{webhookSignature: []}]` and nothing else, and
+# > the document can say that truthfully because the router agrees:
+# > `test/courier_web/router_test.exs` asserts it is **not** behind the
+# > authenticated pipeline and that it is behind `:api`.
+# >
+# > Its `401` therefore does not mean "no bearer token", and it is a reusable
+# > response of its own (`SignatureRejected`) rather than the `Unauthorized` every
+# > other operation shares — the same decision `MessageSuppressed` and
+# > `NotificationPreferencesNotFound` made, for the same reason: a different
+# > meaning wants a different sentence.
+# >
+# > The two notification-preferences operations, which are the other half of that
+# > history, were once served with `security: []` and a `> DECISION NEEDED
+# > (courier-05)` above this line recording the gap. That is closed: both are
+# > behind the plug, `info.version` went to **2.0.0**, and the cost was paid then
+# > because there was no 2.x client. `receiveResendReport` is the first operation
+# > in this file with `security` other than `bearerAuth`, and it is not a gap — it
+# > is the only way an inbound webhook can be authenticated truthfully.
+#
+# The three answers on those two operations are the same three the webhooks give,
+# because they go through the same plug and are decided in the same context:
+#
+#   * **anonymous → 401**, from `CourierWeb.Plugs.Principal`, whose default
+#     resolver authenticates nobody — so a courier deployed without identity's JWT
+#     verifier locks these routes rather than serving them.
+#   * **another account → 404**, for a user whose stored preferences belong to
+#     somebody else. Not a 403: core's conventions forbid a 403 that leaks the
+#     existence of a resource the caller cannot see.
+#   * **a user nobody has written preferences for → 200**, with the defaults. The
+#     404 above is deliberately narrow — courier holds no foreign key to identity's
+#     users, so with no stored rows it knows nothing about the user, and a 404
+#     would be courier claiming to know something about the requester it does not
+#     know.
+#
+# **A user's preferences belong to an account, and the account is recorded rather
+# than asked for.** `notification_preferences.account_id` is written from the
+# principal, never from a request, and the unique index stays on
+# `(user_id, notification_type)` — a user has one set of preferences, not one per
+# account, so the account is the row's owner rather than part of its identity.
+# The consequence a caller can observe: the **first** authenticated `PUT` for a
+# user id is what records the owning account, because courier cannot ask identity
+# which account a user belongs to. An account that writes for an unwritten user id
+# claims that user and gets no access to anything that existed.
+#
+# ## What courier does not return, and why that is written down here
+#
+# A document that omits a reachable response is worse than one that says what it
+# covers, so the omissions are declared rather than left to be found. Each of the
+# following was measured against this repository's endpoint rather than read off
+# it, and each is the reason no operation below declares it:
+#
+#   * **403 `forbidden`** — nothing sends it. `CourierWeb.Plugs.Principal`
+#     answers 401 for an anonymous caller and nothing else, and a resource in
+#     another account is a 404, because core forbids a 403 that leaks existence.
+#   * **409 on a duplicate `url`** — a duplicate `url` is a **422** whose
+#     `errors[0].code` is `taken`, which is the status convention's
+#     "semantically wrong", not a conflict. The 409s that *are* declared are for
+#     `Idempotency-Key` and for `sendMessage`, below.
+#   * **415 `unsupported_media_type`** — the parser is configured
+#     `pass: ["*/*"]`, so an unknown content type is neither parsed nor refused.
+#     The request reaches the controller and is answered 422 for the field it did
+#     not carry.
+#   * **429 `rate_limited`** — there is no limiter. Thirty rapid reads answer
+#     thirty 200s and thirty rapid writes answer thirty 201s.
+#
+# ## 503 `unavailable` is declared now, and this line is what changed
+#
+# It used to sit in the list above with the note "only `GET /readyz` sends it",
+# which was true and is no longer. `sendMessage` has a dependency courier does not
+# control — an SMTP relay — and a send has to be able to say so:
+#
+#   * **the provider refused.** A 4xx or 5xx from the relay, a refused credential,
+#     a socket that would not open. Nothing was sent, no outbox row was written,
+#     and the retry is safe.
+#   * **courier cannot deliver at all.** `COURIER_MAIL_ADAPTER` names an adapter
+#     that never opens a socket, or names none. This is the same predicate
+#     `Courier.MailerAdapter` checks at boot, asked a third time per request — not
+#     because the boot gate is insufficient, but because **the refusal has to be
+#     visible to the caller**. A courier that booted with a silent adapter would
+#     otherwise answer 200, write an outbox row and publish
+#     `courier.email.delivered` for mail nobody receives, which is the whole
+#     failure the adapter work exists to end.
+#
+# It is 503 and not 500 because courier is fine and its dependency is not, and that
+# is the difference between a generated client retrying and a generated client
+# filing a bug against courier. `GET /readyz` still sends it, and still is not an
+# operation in this document.
+#
+# ## Idempotency-Key, and what each of the three answers means
+#
+# All three mutating `POST`s accept `Idempotency-Key`, as core's conventions
+# require of a POST that can be retried safely. `createWebhookEndpoint` registers a
+# destination that will receive at-least-once deliveries, and a caller that timed
+# out on it has no other way to learn whether the first attempt landed. `sendMessage`
+# is the strongest case of the three: a send is not idempotent by HTTP's definition,
+# so a caller that timed out and retried without the header **mails somebody twice**,
+# and there is no way for courier to tell the two messages apart afterwards.
+#
+# courier-12 measured that courier did **not** implement this, and said so here
+# rather than declaring a contract for behaviour that was not there. That gap is
+# closed as of courier-14, and this section is rewritten rather than deleted, so
+# the reader can see that the header was once accepted and ignored and is now the
+# mechanism the 409s below exist for.
+#
+#   * **Same key, same body, already answered** — the stored response, byte for
+#     byte, with `Idempotency-Replayed: true`. For `createWebhookEndpoint` that
+#     response carries the signing secret, which exists in exactly one 201 and
+#     cannot be re-derived, so a client that lost the first response to a timeout
+#     gets the secret back from its retry.
+#   * **Same key, different body** — 409 `idempotency_key_reused`.
+#   * **Same key, same body, first attempt still running** — 409 `conflict`.
+#     Core's five sentences do not describe the concurrent case, and this is
+#     courier's answer: not `idempotency_key_reused`, because the bodies are
+#     identical and saying otherwise is a lie a retry loop is built on, and not a
+#     503, because nothing is unavailable. `conflict` is core's own word for a
+#     request that collides with current state.
+#
+# Three things the header does **not** do, each measured rather than assumed:
+#
+#   * **A request with no key is processed normally** and records nothing. A
+#     retry without a key is the client's bug, and it is answered as though the
+#     key were absent.
+#   * **Only a 2xx is stored.** A 4xx leaves the key free immediately, so a
+#     client that fixed its request and retried with the same key gets its new
+#     answer rather than a 409 about a key it never reused; a 5xx leaves it free
+#     too, so a transient courier failure is not pinned for a day.
+#   * **A key that is not a uuid is a 422.** courier-12 measured that a non-uuid
+#     and a 5000-character key were both accepted without complaint; the second
+#     of those was a string in a unique index, paid for by every write.
+#
+# Retention is 24 hours, scoped to the `(account, endpoint, key)` triple with
+# `endpoint` the concrete path. REPORT-courier-14-coreversion.md has the
+# measurements, including the two Elixir behaviours that had to be discovered the
+# hard way and are now written into the code that depends on them.
+#
+# ## The inbound provider surface, and why its 400 is signed-only
+#
+# `POST /inbound/resend` is the first operation here with **no `Idempotency-Key`**
+# and the only one authenticated by something other than a bearer token, and both
+# are decisions rather than gaps. The reasoning is long and it lives in the code —
+# `CourierWeb.InboundReports`'s moduledoc and `CourierWeb.InboundController`'s — so
+# what this header records is the two consequences a client needs and cannot
+# derive:
+#
+#   * **A provider retry is a 200, not a 409.** Delivery is at-least-once and a
+#     provider delivering the same report twice is normal, not an error.
+#     Deduplication is `email_suppressions`'s unique index on
+#     `(provider, provider_event_id)`, which `Courier.Inbound.Resend` derives from
+#     the report's own **content** rather than from the `webhook-id` header — a
+#     stronger key, because one delivery can name many recipients and keying on the
+#     header would collapse a broadcast into one row. The second delivery answers
+#     `200` with `data.duplicates` above zero and writes nothing.
+#   * **The 400 is reachable only by somebody holding the signing secret.** The
+#     obvious way to check this operation's 400 — POST a body that is not JSON, as
+#     `test/courier_web/openapi_error_responses_test.exs` does for every other
+#     operation — gets a **401**, and that is the security property rather than an
+#     inconvenience: courier refuses before it reads a byte of the body, so a forged
+#     request is told nothing about whether its payload parsed.
+#     `openapi_error_responses_test.exs` therefore asks this operation its 400 with a
+#     **signed** malformed body, which is the only way to reach the status, and the
+#     test says so where it does it.
+#
+# And the one thing this surface never does, which is stated here because the
+# operation is the only place a suppression could leak: **no response on this
+# operation carries an email address.** Not the `200` counts, not a `422`'s
+# `detail`, not a log-derived value echoed back. `email_suppressions` has no
+# `account_id` and is not exposed through any route, so an address in a response is
+# a way to ask courier questions about mailboxes it holds. The address appears in
+# courier's **logs**, which is where `Courier.Inbound.Resend`'s refusals put it and
+# where `POST /v1/messages`'s 409 does not.
+#
+# ## Two other facts about this surface, because a reader is owed them
+#
+#   * **`?order=` and `?offset=` are accepted and ignored.** Core's standard
+#     request shape is `?limit=&cursor=&order=asc|desc`; courier paginates
+#     oldest-first only, so a request carrying `order` is answered as if it were
+#     not there, and `offset` is ignored for the reason core gives for banning it.
+#     Neither is declared below, because neither is honoured.
+#   * **`limit` is capped silently.** `?limit=99999` is a 200 answering with at
+#     most 100 rows, not a 422. The cap is real and is stated in the parameter;
+#     what a client cannot see from here is that it was applied.
+#
+# ## Why `400` is on some operations and not others
+#
+# `CourierWeb.Plugs.ParseBody` wraps `Plug.Parsers`, and that reads a request body
+# for `POST`, `PUT`, `PATCH` and `DELETE` — and for no other verb. So the 400 is
+# reachable on exactly the four operations above that carry one of those verbs,
+# which is not the same as "every operation that takes input": `GET` sends no body
+# and is refused by neither the parser nor anything else, and a `400` declared on a
+# `GET` is a case a client writes and can never run.
+#
+# `DELETE` is the one that reads wrong. A `DELETE` carries no body in any sensible
+# client, so it looks bodyless, and a document that omits its 400 looks right —
+# until a client that does send one is answered with a body nobody documented. It
+# is declared for that reason, and
+# `test/courier_web/openapi_error_responses_test.exs` checks the agreement in both
+# directions so neither half can drift back.
 openapi: 3.1.0
 
 info:
   # The document's own semantic version, which moves with the document and not
   # with the `/v1` prefix. The prefix changes only on a breaking change, and then
-  # this number changes in the same commit. This is a minor bump: two operations
-  # were added, nothing that exists changed shape.
-  version: 1.2.0
+  # this number changes in the same commit.
+  #
+  # This is a **major** bump and the first one this document has taken, so the
+  # reason is stated rather than implied by the number. No path changed, no
+  # operation was added or removed, and no response body changed shape — but
+  # `GET` and `PUT /v1/notification_preferences/{user_id}` went from `security:
+  # []` to requiring a bearer token, which is a change to what a client has to
+  # send and therefore a breaking change to the contract rather than an additive
+  # one. A client generated from 1.4.0 sends no token and receives a 401.
+  #
+  # The previous bump (1.3.0 → 1.4.0, courier-14) was a minor one for the
+  # opposite reason: `Idempotency-Key` and the two 409s it can now answer describe
+  # what courier began doing, and a client that sends no key is unaffected.
+  #
+  # The bump to 2.1.0 is minor, and it is the additive kind core's conventions
+  # describe: one new operation (`POST /v1/messages`) and no change to any
+  # existing path, verb, request field or response shape. A client generated from
+  # 2.0.0 keeps working against it, which is what makes it minor.
+  #
+  # The bump to 2.2.0 is minor for the same reason, and with one addition worth
+  # naming because it is not additive in the usual sense: one new operation
+  # (`POST /inbound/resend`), a new `webhookSignature` security scheme, and three
+  # new reusable responses — and **no existing path, verb, request field or
+  # response shape changed at all**. A client generated from 2.1.0 keeps working
+  # against it unchanged, including the nine operations that were already there
+  # and the document-level `security` they inherit.
+  #
+  # The inbound operation is not in `/v1` and that is deliberate rather than an
+  # exception to core's "path under /v1" checklist: `/v1` is courier's versioned
+  # contract with a **tenant**, every operation under it takes a bearer token, and
+  # PLAN.md MD6 has the platform generating client SDKs from this file — so an
+  # operation filed under `/v1` that cannot take a bearer token is a method a
+  # generated client will call wrongly. The checklist's line is about the
+  # customer-facing API; an inbound webhook is not one.
+  version: 2.2.0
   title: caFaye courier
   description: |
     Transactional email, notification preferences, and outbound webhooks.
@@ -47,8 +279,9 @@ info:
     name: courier
     email: courier@cafaye.com
   license:
-    name: AGPL-3.0
-    identifier: AGPL-3.0-only
+    name: MIT
+    identifier: MIT
+    url: https://opensource.org/license/mit
 
 servers:
   - url: https://courier.cafaye.com
@@ -66,11 +299,344 @@ tags:
       What a user has been asked to receive, per notification type and per channel.
       Silence is not consent: a user courier has never seen, or a type a user has
       never mentioned, is on.
+  - name: messages
+    description: |
+      courier's send path, over HTTP. One operation, and it is the only door into
+      it — everything else in this service reads or configures what a send will
+      do rather than causing one.
+  - name: inbound reports
+    description: |
+      What a mail provider reports back about a recipient: a hard bounce, a spam
+      complaint, a temporary failure. courier acts on the first two by suppressing
+      the address, and this is the only operation in this document a **provider**
+      calls — signed, not token-authenticated, because a provider is not a tenant.
 
 security:
   - bearerAuth: []
 
 paths:
+  /inbound/resend:
+    post:
+      tags: [inbound reports]
+      operationId: receiveResendReport
+      summary: One provider report about one or more recipients
+      # `webhookSignature`, not `bearerAuth` and **not** an empty `security: []`.
+      # The empty form is what this document spent courier-16 removing from two
+      # operations, and it would be wrong here for a different reason: it tells a
+      # generated client the operation is unauthenticated, which is the opposite of
+      # the truth. The truth is that it is authenticated by a signature the
+      # *sender* computes, and naming the mechanism is the only way a document can
+      # say that. See this file's header.
+      security:
+        - webhookSignature: []
+      description: |
+        Delivers one Resend deliverability report, and answers what courier did
+        with it. This is the door `Courier.Suppressions` was written for: until it
+        existed, `email_suppressions` was written by nothing but tests, a customer's
+        hard-bounced address went on being mailed forever, and a sending domain's
+        reputation died of a cause no dashboard names.
+
+        ## Who this is for
+
+        **Resend, not a customer.** It is authenticated by the Svix signature on
+        the request, never by a bearer token, and it is deliberately outside `/v1`
+        for the same reason: `/v1` is this service's contract with a tenant.
+
+        ## What a 200 means, and what it counts
+
+        The signature verified, courier read the report, and the counts say what
+        happened to each recipient. There is no status for "courier read it and did
+        nothing", so the counts carry that distinction:
+
+        | `data` field | meaning |
+        | --- | --- |
+        | `received` | reports the payload contained — one per **recipient**, so a broadcast to five addresses is 5 |
+        | `recorded` | suppression rows newly written, which is what stops courier mailing that mailbox |
+        | `duplicates` | reports courier already held, written by a redelivery |
+        | `ignored` | temporary failures, which courier deliberately records nothing about |
+        | `events` | `courier.email.bounced` / `.complained` rows published |
+
+        `recorded` and `events` are the same number in every case except one, and
+        the difference is deliberate: a report whose `Message-ID` names a send
+        courier made publishes an event, and one that names nothing courier
+        recognises records the suppression and publishes no event. **The
+        suppression is the load-bearing half** — the address is not going to be
+        mailed again whatever courier can say about which message it was — so the
+        row is written and the missing event is a log line, not a rollback that
+        would throw the row away with it.
+
+        ## A redelivery is a 200, and this operation takes no `Idempotency-Key`
+
+        A provider retries a webhook it got no answer for. That is **normal**:
+        delivery is at-least-once. A second delivery of the same report is answered
+        `200` with `data.duplicates` above zero and **writes nothing** — the row and
+        its event are both already there.
+
+        The deduplication is `email_suppressions`'s unique index on
+        `(provider, provider_event_id)`, and the key is derived from the report's
+        own **content** rather than from the `webhook-id` header. That is the one
+        place this departs from the reference implementation's advice, and the
+        reason is a broadcast: one delivery carries one `webhook-id` and a `to` of
+        every address it reached, so keying on the header would collapse five
+        bounced addresses into one suppression and go on mailing four of them for
+        ever. The content-derived key records one row per address and a redelivery
+        is still one row per address.
+
+        `Idempotency-Key` is absent, and the reason is that the header a provider
+        sends is one no provider sends: the retry identity here is the Svix
+        signature, and the storage that makes it free is the unique index above.
+
+        ## The order, and what it means for the statuses
+
+        The signature is checked **before the body is parsed**, and nothing
+        upstream decodes it either — this operation's body is deliberately left
+        unparsed by the endpoint's `Plug.Parsers` so the bytes that arrive are the
+        bytes that were signed. Spec §Signature scheme names parse-then-re-
+        serialize as "a very common failure mode" of verification.
+
+        Two statuses follow from that order, and both are worth a client reading
+        twice:
+
+          * **An unsigned request is a 401, whatever its body.** A forged request
+            is told nothing about whether its payload parsed, because courier never
+            looked.
+          * **The 400 is reachable only with a valid signature.** A body that is not
+            JSON, *signed correctly*, is a 400 — there is no field to name and
+            nothing to correct, which is core's own line for 400 against 422. The
+            same body unsigned is a 401.
+
+        ## Refusals that are courier's own, not the provider's
+
+        `500` means **courier** is misconfigured — no signing secret, or one it
+        cannot decode. It is deliberately not a 401: a route answering 401 to its
+        own misconfiguration is indistinguishable from one under attack, and the
+        operator's first question would be the wrong one. `503` means the report
+        could not be written; the transaction unwound, so nothing is half-recorded
+        and the retry is safe.
+
+        ## What a caller cannot see
+
+        **No response on this operation carries an email address.** Not the counts,
+        not a 422's `detail`, not a value echoed back from the payload. The
+        suppression table has no `account_id` and is not exposed through any route,
+        so an address in a response would be a way to ask courier questions about
+        mailboxes it holds — the same posture as the 409 on `sendMessage`, which
+        does not echo one either. The address appears in courier's **logs**, where
+        `Courier.Inbound.Resend`'s refusals put it.
+      parameters:
+        - $ref: '#/components/parameters/SvixId'
+        - $ref: '#/components/parameters/SvixTimestamp'
+        - $ref: '#/components/parameters/SvixSignature'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResendReport'
+            examples:
+              bounced:
+                summary: A permanent bounce — the recipient's mailbox does not exist
+                value:
+                  type: email.bounced
+                  created_at: '2026-11-22T23:41:12.126Z'
+                  data:
+                    email_id: 56761188-7520-42d8-8898-ff6fc54ce618
+                    message_id: <courier-6f5d4c3b-2a19-4e8f-9c07-1b2d3e4f5061@cafaye.com>
+                    to: [bounced@example.com]
+                    from: Acme <onboarding@resend.dev>
+                    subject: Sending this example
+                    bounce:
+                      type: Permanent
+                      subType: General
+                      message: The recipient's email address does not exist.
+                      diagnosticCode: ['550 5.1.1 The email account that you tried to reach does not exist.']
+              complained:
+                summary: A spam complaint — the recipient pressed a button
+                value:
+                  type: email.complained
+                  created_at: '2026-11-22T23:41:12.126Z'
+                  data:
+                    email_id: 56761188-7520-42d8-8898-ff6fc54ce618
+                    message_id: <courier-6f5d4c3b-2a19-4e8f-9c07-1b2d3e4f5061@cafaye.com>
+                    to: [complained@example.com]
+                    from: Acme <onboarding@resend.dev>
+                    subject: Sending this example
+              delayed:
+                summary: A temporary failure, which courier records nothing about
+                value:
+                  type: email.delivery_delayed
+                  created_at: '2026-11-22T23:41:12.126Z'
+                  data:
+                    email_id: 56761188-7520-42d8-8898-ff6fc54ce618
+                    message_id: <courier-6f5d4c3b-2a19-4e8f-9c07-1b2d3e4f5061@cafaye.com>
+                    to: [delayed@example.com]
+      responses:
+        '200':
+          description: The report was read; the counts say what courier did with it
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/InboundReportCounts' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/SignatureRejected' }
+        '406': { $ref: '#/components/responses/NotAcceptable' }
+        '422': { $ref: '#/components/responses/ReportNotActionable' }
+        '500': { $ref: '#/components/responses/Internal' }
+        '503': { $ref: '#/components/responses/ReportNotRecorded' }
+
+  /v1/messages:
+    post:
+      tags: [messages]
+      operationId: sendMessage
+      summary: Send one transactional message
+      security:
+        - bearerAuth: [messages:write]
+      description: |
+        Sends one of courier's transactional messages and answers with what
+        happened. This is the operation the platform's password reset, email
+        verification, email change and team invitation flows call; until it
+        existed those endpoints were reachable-looking and none of them could
+        complete.
+
+        ## What a 200 means, precisely
+
+        **The provider accepted the message for delivery, and courier wrote the
+        `courier.email.delivered` outbox row in the same transaction.** It does
+        **not** mean the mail arrived. A submission protocol's whole reply is
+        "accepted for delivery"; courier has no delivery receipt and will not
+        imply one it does not hold. `data.status` therefore reads `accepted` and
+        never `delivered` — a field reading `delivered` would be courier claiming
+        a fact about somebody else's inbox that courier cannot know yet.
+
+        The send is **synchronous**: the preference check, the suppression check,
+        the provider's dial and the outbox row all happen inside the request, so
+        this response is the real outcome rather than a receipt for an intention.
+        The consequence is that a 409 below is a refusal the caller can act on,
+        which a queued contract could not give them — the answer would arrive after
+        the response, and a caller who cannot tell "suppressed" from "sent" retries
+        forever.
+
+        ## Three refusals, told apart by status and `code`
+
+        A client branches on `code` and not on `detail`, so the three outcomes
+        below are distinguishable without parsing prose:
+
+        | outcome | status | `code` | retry? |
+        | --- | --- | --- | --- |
+        | accepted for delivery | 200 | — | — |
+        | the recipient's mailbox is suppressed | 409 | `conflict` | **no** |
+        | the request is wrong, or the user declined this type | 422 | `validation_failed` | after fixing it |
+        | the provider refused, or courier cannot deliver | 503 | `unavailable` | yes, same key |
+
+        **A suppressed mailbox is a 409, not a 422**, and the reason is that it is
+        not a property of the request. A hard bounce and a spam complaint are
+        facts about a *mailbox*, recorded by a provider and not chosen by this
+        caller, and courier's suppression list is not exposed through any route —
+        so this response is the only place the fact can surface. 409 `conflict` is
+        core's own code for a request colliding with the current state of a
+        resource, and it is the status that tells a generated client not to try
+        again. A 422 would tell the caller to change a request that cannot be
+        changed.
+
+        **A declined preference is a 422**, the opposite answer on purpose. The
+        user declining is visible through `GET /v1/notification_preferences/{user_id}`,
+        it is changeable through the `PUT` beside it, and `errors[]` — which core
+        reserves for 422 and nothing else — can name `type` as the field at
+        fault.
+
+        **A provider refusal is a 503 and not a 500**, because courier is fine and
+        its dependency is not. Nothing was sent and no row was written, so the
+        retry is safe; and a failed request **releases** its `Idempotency-Key`
+        rather than storing the failure, so a retry is not locked out for 24 hours.
+
+        ## Authentication
+
+        Required, and not as a formality: an unauthenticated `POST` to a mail
+        egress is an open relay, and it is the one surface where that would be
+        true rather than theoretical. courier does not guess an account for an
+        anonymous caller, and a deployment without identity's JWT verifier locks
+        this route rather than serving it. The account comes from the principal
+        and **never from the body** — a body carrying `account_id` is a 422 naming
+        that field.
+
+        ## Why there is no `from`, and no `text`/`html`
+
+        Both are deliberate refusals of the obvious design, and the argument is
+        the same: courier sends *transactional* mail it renders from its own
+        templates, and a caller that could choose the sender would be a phishing
+        relay wearing the platform's sending domain — a cost borne by every other
+        tenant. So the sender and the subjects are configuration
+        (`COURIER_MAIL_*`), a body carrying `from` is a 422, and the bodies come
+        from templates keyed on `type`. What remains of "at least one of
+        text/html" is a check on the **rendered** message rather than on the
+        request: courier refuses to send a message with neither body, because
+        `Swoosh` would accept it and answer a provider-shaped id, and a bodiless
+        mail reported as delivered is the exact silent default this service has
+        spent two packets refusing.
+
+        ## Idempotency
+
+        Send `Idempotency-Key` and a retry with the same key and the same body
+        returns the first response byte for byte with `Idempotency-Replayed:
+        true`, having sent **one** mail. Omit it and a retry sends a second mail:
+        a send is not idempotent by HTTP's definition, and that is the caller's
+        own problem rather than something courier hides. The header is documented
+        here because silence about it would be the worse answer.
+
+        ## What a caller cannot see
+
+        The suppression list is never exposed through a route. A 409 says a
+        mailbox cannot be written to and does **not** echo the address back, and
+        `email_suppressions` carries no `account_id` — so the refusal is a fact
+        about a mailbox rather than about another tenant's data, and it is the
+        same posture the send path takes when it answers "no mail went out" rather
+        than "here is a list".
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendMessageRequest'
+            examples:
+              welcome:
+                summary: A welcome message
+                value:
+                  type: welcome
+                  user_id: 6f5d4c3b-2a19-4e8f-9c07-1b2d3e4f5061
+                  to: kaka@example.com
+                  name: Kaka
+              password_reset:
+                summary: A password reset, which needs a link
+                value:
+                  type: password_reset
+                  user_id: 6f5d4c3b-2a19-4e8f-9c07-1b2d3e4f5061
+                  to: kaka@example.com
+                  url: https://cafaye.com/reset?token=6f5d4c3b
+      responses:
+        '200':
+          description: The provider accepted the message for delivery
+          headers:
+            Idempotency-Replayed:
+              $ref: '#/components/parameters/IdempotencyReplayed'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/SendMessageResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '406': { $ref: '#/components/responses/NotAcceptable' }
+        '409': { $ref: '#/components/responses/MessageSuppressed' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/Internal' }
+        '503': { $ref: '#/components/responses/Unavailable' }
   /v1/notification_preferences/{user_id}:
     parameters:
       - $ref: '#/components/parameters/UserId'
@@ -79,19 +645,25 @@ paths:
       tags: [notification preferences]
       operationId: getNotificationPreferences
       summary: What this user has been asked to receive
+      security:
+        - bearerAuth: [notifications:read]
       description: |
         Every notification type courier sends, with this user's stored answers
         filled in and the defaults used where there are none. A `GET` never writes.
 
-        **An unknown user is a 200, not a 404.** identity owns the user table.
+        **An unwritten user is a 200, not a 404.** identity owns the user table.
         courier is asked about a user id and answers with that user's
         preferences, which for a user who has never touched the settings is
         three types, all on. A 404 would be courier claiming to know something
         about the requester it does not know.
 
-        Served without authentication — see this document's header, which records
-        the gap and why it is not quietly written over here.
-      security: []
+        **A user whose preferences belong to another account is a 404**, and
+        that is the one case where the previous sentence does not apply: there is
+        a resource, it is not the caller's, and a 403 would confirm it exists.
+        The 404 appears only once somebody has written preferences for that user
+        id — see this document's header for why the account is recorded rather
+        than asked of identity, and what that means for who owns an unwritten
+        user id.
       responses:
         '200':
           description: Every notification type, with this user's answers
@@ -102,13 +674,18 @@ paths:
                 required: [data]
                 properties:
                   data: { $ref: '#/components/schemas/NotificationPreferences' }
-        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotificationPreferencesNotFound' }
+        '406': { $ref: '#/components/responses/NotAcceptable' }
         '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/Internal' }
 
     put:
       tags: [notification preferences]
       operationId: updateNotificationPreferences
       summary: Apply a batch of preferences
+      security:
+        - bearerAuth: [notifications:write]
       description: |
         Stores a batch and answers with the state the user now has — the same
         shape a `GET` returns, so a settings page does not have to follow a write
@@ -124,8 +701,10 @@ paths:
         `user_id` comes from the path and is never read from the body. A body
         that names a different user cannot write that user's preferences.
 
-        Served without authentication — see this document's header.
-      security: []
+        `account_id` cannot be named by a request at all: it is not a field of a
+        preference entry, so an entry carrying one is a 422 naming
+        `preferences[0].account_id`, and one beside the batch names nothing this
+        operation reads.
       requestBody:
         required: true
         content:
@@ -172,7 +751,11 @@ paths:
                 properties:
                   data: { $ref: '#/components/schemas/NotificationPreferences' }
         '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotificationPreferencesNotFound' }
+        '406': { $ref: '#/components/responses/NotAcceptable' }
         '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/Internal' }
 
   /v1/webhook_endpoints:
     get:
@@ -196,7 +779,9 @@ paths:
               schema:
                 $ref: '#/components/schemas/WebhookEndpointPage'
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '406': { $ref: '#/components/responses/NotAcceptable' }
         '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/Internal' }
 
     post:
       tags: [webhook endpoints]
@@ -212,6 +797,8 @@ paths:
         told which one they have.
       security:
         - bearerAuth: [webhooks:write]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
         content:
@@ -239,6 +826,9 @@ paths:
       responses:
         '201':
           description: Registered, with the signing secret
+          headers:
+            Idempotency-Replayed:
+              $ref: '#/components/parameters/IdempotencyReplayed'
           content:
             application/json:
               schema:
@@ -257,9 +847,66 @@ paths:
                             description: |
                               The Standard Webhooks signing secret, base64
                               encoded behind the `whsec_` prefix. Shown once.
-                            examples: ['whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw']
+
+                              This field deliberately carries NO example value.
+                              A secret of this kind is not usefully
+                              exemplified — the only real one a caller will
+                              ever see is the one this response hands back,
+                              and a made-up example in a public specification
+                              costs more than it teaches: GitHub's secret
+                              scanning matches the `whsec_`-plus-base64 SHAPE
+                              rather than the content, this repository is
+                              public, and every realistic example value pushed
+                              here opened an alert that somebody then had to
+                              resolve. Five were opened on 2026-10-01 and all
+                              five were documentation or test fixtures.
+
+                              The `pattern` above is the machine-readable
+                              contract: `whsec_`, then base64. A conforming
+                              secret is 32 random bytes, so it base64-decodes
+                              to nothing readable — which is also the quick
+                              way to tell a real one from a fixture. The
+                              third-party test vector in
+                              `test/courier/inbound/signature_test.exs` is
+                              svix's own published worked example and is the
+                              one intentional literal in this repository; it
+                              pins signature verification against a party
+                              other than this repository and should not be
+                              removed to satisfy a scanner. An alert on any
+                              other `whsec_` value that decodes to nothing
+                              readable is a real one: stop, rotate, and
+                              investigate.
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '406': { $ref: '#/components/responses/NotAcceptable' }
+        '409':
+          description: >-
+            The `Idempotency-Key` was reused with a different body, or its first
+            request is still in flight. The two are distinguished by `code`.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                reused:
+                  summary: Same key, different body
+                  value:
+                    type: https://errors.cafaye.com/idempotency_key_reused
+                    title: Idempotency key reused
+                    status: 409
+                    detail: That Idempotency-Key was already used for a different request body.
+                    code: idempotency_key_reused
+                    trace_id: 0af7651916cd43dd8448eb211c80319c
+                in_flight:
+                  summary: Same key, first request still running
+                  value:
+                    type: https://errors.cafaye.com/conflict
+                    title: Conflict
+                    status: 409
+                    detail: That Idempotency-Key is still being processed.
+                    code: conflict
+                    trace_id: 0af7651916cd43dd8448eb211c80319c
         '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/Internal' }
 
   /v1/webhook_endpoints/{id}:
     parameters:
@@ -283,6 +930,8 @@ paths:
                   data: { $ref: '#/components/schemas/WebhookEndpoint' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '406': { $ref: '#/components/responses/NotAcceptable' }
+        '500': { $ref: '#/components/responses/Internal' }
 
     patch:
       tags: [webhook endpoints]
@@ -322,9 +971,12 @@ paths:
                 required: [data]
                 properties:
                   data: { $ref: '#/components/schemas/WebhookEndpoint' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '406': { $ref: '#/components/responses/NotAcceptable' }
         '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/Internal' }
 
     delete:
       tags: [webhook endpoints]
@@ -335,8 +987,11 @@ paths:
       responses:
         '204':
           description: Removed. No body.
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '406': { $ref: '#/components/responses/NotAcceptable' }
+        '500': { $ref: '#/components/responses/Internal' }
 
   /v1/webhook_endpoints/{id}/test:
     parameters:
@@ -357,11 +1012,21 @@ paths:
         testing their own endpoint and getting a 500 has learned something true,
         and charging their circuit for asking would punish them for using the
         diagnostic.
+
+        `Idempotency-Key` applies here too, and it matters more than it looks: a
+        retried ping with the same key is answered from the stored response, so
+        the customer's endpoint receives **one** signed request rather than two. A
+        test endpoint that receives duplicates is a support question.
       security:
         - bearerAuth: [webhooks:write]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       responses:
         '200':
           description: The ping was sent; `delivered` says whether it was accepted
+          headers:
+            Idempotency-Replayed:
+              $ref: '#/components/parameters/IdempotencyReplayed'
           content:
             application/json:
               schema:
@@ -382,8 +1047,37 @@ paths:
                       duration_ms:
                         type: integer
                         description: How long the attempt took.
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '406': { $ref: '#/components/responses/NotAcceptable' }
+        '409':
+          description: >-
+            The `Idempotency-Key` was reused with a different body, or its first
+            request is still in flight. The two are distinguished by `code`.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                reused:
+                  summary: Same key, different body
+                  value:
+                    type: https://errors.cafaye.com/idempotency_key_reused
+                    title: Idempotency key reused
+                    status: 409
+                    detail: That Idempotency-Key was already used for a different request body.
+                    code: idempotency_key_reused
+                    trace_id: 0af7651916cd43dd8448eb211c80319c
+                in_flight:
+                  summary: Same key, first request still running
+                  value:
+                    type: https://errors.cafaye.com/conflict
+                    title: Conflict
+                    status: 409
+                    detail: That Idempotency-Key is still being processed.
+                    code: conflict
+                    trace_id: 0af7651916cd43dd8448eb211c80319c
+        '500': { $ref: '#/components/responses/Internal' }
 
 components:
   securitySchemes:
@@ -397,7 +1091,91 @@ components:
         out of a claim, because core's conventions say a service asks identity
         about roles and checks scopes itself.
 
+    webhookSignature:
+      type: apiKey
+      in: header
+      name: svix-signature
+      description: |
+        **Not a token: a signature the sender computes over the body.**
+
+        This is the [Standard Webhooks](https://www.standardwebhooks.com) scheme,
+        the one courier signs its *outbound* deliveries with, read from the other
+        side — Resend signs with [Svix](https://docs.svix.com), which is the scheme
+        Standard Webhooks was standardised from, so the identical base string,
+        algorithm, `v1` prefix and space-delimited rotation list apply in both
+        directions. A receiver can therefore verify a delivery from this service
+        and courier can verify one from Resend with the same reference
+        implementation.
+
+        It is declared as an `apiKey`-in-header scheme because that is what
+        OpenAPI 3.1 has for "a credential in a header that is not a bearer token",
+        and it is declared **rather than left as `security: []`** because an empty
+        `security` tells a generated client the operation is *unauthenticated*,
+        which is the opposite of the truth. This operation is authenticated; the
+        credential just happens to be computed rather than issued.
+
+        The three headers it needs are declared as parameters on the operation —
+        `svix-id`, `svix-timestamp` and `svix-signature` — because this scheme
+        **names the one header here but requires all three**, and a document that
+        declared only the one would be telling a client to send a signature with
+        nothing to sign.
+
   parameters:
+    SvixId:
+      name: svix-id
+      in: header
+      required: true
+      description: |
+        The delivery's own id. It is part of the signed base string
+        (`msg_id.timestamp.payload`), so it cannot contain a full stop — a dot
+        would let a sender append fields to a string the receiver treats as
+        verified.
+
+        courier does **not** use it as an idempotency key, and the operation's
+        description says why: one delivery can name many recipients, and keying on
+        the header would collapse a broadcast into one suppression.
+      schema: { type: string, minLength: 1, pattern: '^[^.]+$' }
+
+    SvixTimestamp:
+      name: svix-timestamp
+      in: header
+      required: true
+      description: |
+        When the delivery was signed, as a bare integer of seconds since the epoch.
+        It must be a bare integer: the receiver builds the base string from the
+        header's own bytes, so a lenient parse would verify one string and act on
+        another.
+
+        It is also courier's **replay window**. A signature outside ±300 seconds is
+        refused even when it is otherwise correct, which is the other half of
+        replay protection — the unique index handles a replay *inside* the window,
+        and the window handles one outside it.
+      schema: { type: integer }
+
+    SvixSignature:
+      name: svix-signature
+      in: header
+      required: true
+      description: |
+        The signature, as `v1,<base64 HMAC-SHA256>` over
+        `svix-id.svix-timestamp.body`.
+
+        **Space-delimited, and that is not incidental**: a producer rotating its key
+        sends the current and the previous signature together, and an unrecognised
+        identifier in the list is skipped rather than refused so it cannot stop the
+        `v1` entry beside it from being found. So courier's key rotation needs no
+        downtime and no coordination beyond the provider-side change.
+
+        The comparison is constant-time. A verifier that is merely correct is not
+        enough — the scheme's own guidance is that failing to compare in constant
+        time "can expose consumers to timing-attacks and turn them into signing
+        oracles".
+
+        The `webhook-` prefixed spellings are accepted as well, because the scheme
+        says headers "should be prefixed with `webhook-`" and Svix sends `svix-`
+        unless an account is white-labelled.
+      schema: { type: string, pattern: '^v1,[A-Za-z0-9+/=]+' }
+
     UserId:
       name: user_id
       in: path
@@ -433,7 +1211,294 @@ components:
         courier did not issue is a 422.
       schema: { type: string }
 
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        A uuid the client chooses, which makes a retry of this request free.
+
+        Send it, and a retry with the **same** key and the **same** body returns
+        the first response byte for byte with `Idempotency-Replayed: true` — for
+        `createWebhookEndpoint` that includes the signing secret, which exists in
+        exactly one response and cannot be re-derived. Without it a caller that
+        timed out cannot know whether the first attempt landed, and retrying a
+        webhook registration produces a second destination courier will sign for.
+
+        Three cases, and a client can tell them apart by `code`:
+
+        | you sent | you get | `code` |
+        | --- | --- | --- |
+        | same key, same body, already answered | the first response, with `Idempotency-Replayed: true` | — |
+        | same key, different body | 409 | `idempotency_key_reused` |
+        | same key, same body, first attempt still running | 409 | `conflict`; retry the same request shortly |
+
+        Omitting the header is not an error: the request is processed normally,
+        and a retry without a key is the client's own problem. A key that is not a
+        uuid is a 422 — the header is a uuid because an unbounded string in a
+        unique index is a cost every write pays.
+
+        The key is scoped to the `(account, endpoint, key)` triple, and `endpoint`
+        is the **concrete** path, so the same key used to test two different
+        endpoints is two different keys. Retention is 24 hours, after which the
+        key behaves as though it had never been used. Only a 2xx is stored, so a
+        request that failed leaves the key free to use again immediately.
+      schema: { type: string, format: uuid }
+
+    IdempotencyReplayed:
+      name: Idempotency-Replayed
+      in: header
+      required: false
+      description: |
+        `true`, and **only** on a response that is a stored replay of an earlier
+        request rather than the answer to the one in front of courier. A client
+        that receives it knows the mutation happened exactly once. Absent on every
+        first response, and absent on every request sent without a key.
+      schema:
+        type: string
+        enum:
+          - 'true'
+
   schemas:
+    SendMessageRequest:
+      type: object
+      required: [type, user_id, to]
+      description: |
+        What to send, to whom, and who it is about.
+
+        **The vocabulary is closed.** An unknown field is a 422 naming it, rather
+        than a field courier silently discards — a misspelled `emai_enabled` that
+        was ignored would leave a caller believing a setting had taken effect.
+        `account_id` is in that set: the account is the principal's and never the
+        body's.
+      additionalProperties: false
+      properties:
+        type:
+          $ref: '#/components/schemas/NotificationType'
+        user_id:
+          type: string
+          format: uuid
+          description: |
+            The user this send is about, and the key the recipient's preferences
+            are read by. Checked for shape only — courier holds no foreign key to
+            identity's users. A non-uuid is a 422: it could key no preference and
+            attribute no event.
+        to:
+          type: string
+          format: email
+          description: |
+            The recipient. courier's payload calls this field `email` because that
+            is what the platform's event payloads carry; over HTTP it is `to`,
+            which is the mail vocabulary.
+
+            This address is checked against courier's suppression list before
+            anything is sent, so a mailbox that hard-bounced or reported a previous
+            message as spam is a **409 `conflict`** — see the operation.
+        name:
+          type: string
+          nullable: true
+          maxLength: 255
+          description: |
+            The recipient's display name, used in the greeting. Optional; courier
+            falls back to a bare greeting when it is absent.
+        url:
+          type: string
+          format: uri
+          maxLength: 2048
+          description: |
+            The link the message carries — the reset link, the invitation link,
+            the confirmation link. Required by `password_reset` and
+            `team_invitation` and unused by `welcome`, which is why its absence is
+            a 422 naming `url` rather than a silently linkless mail.
+        account_name:
+          type: string
+          maxLength: 255
+          description: Required by `team_invitation` only.
+        invited_by:
+          type: string
+          maxLength: 255
+          description: Required by `team_invitation` only.
+        role:
+          type: string
+          maxLength: 255
+          description: |
+            The role offered by a `team_invitation`. Optional and unvalidated
+            against any list — courier has no role vocabulary of its own, and
+            inventing one would put a second source of truth next to identity's.
+
+    SendMessageResult:
+      type: object
+      required: [message_id, event_id, notification_type, user_id, status]
+      properties:
+        message_id:
+          type: string
+          description: |
+            courier's id for this message, and the one on the wire as the
+            `Message-ID` header. A bounce or a complaint quoting it can be tied
+            back to this send, which is the entire reason it is returned.
+        event_id:
+          type: string
+          format: uuid
+          description: |
+            The `courier.email.delivered` outbox row written in the same
+            transaction as the send, so a caller can correlate its own send with
+            the event every subscriber on the bus sees.
+        notification_type:
+          $ref: '#/components/schemas/NotificationType'
+        user_id:
+          type: string
+          format: uuid
+          description: The user this send was about, as the body named them.
+        status:
+          type: string
+          enum: [accepted]
+          description: |
+            Always `accepted`, and never `delivered`. A submission protocol's whole
+            reply is "accepted for delivery"; courier has no delivery receipt and
+            will not imply one it does not hold. A client that needs to know the
+            mail arrived has to wait for the bounce, not read this field.
+
+    InboundReportCounts:
+      type: object
+      required: [received, recorded, duplicates, ignored, events]
+      description: |
+        What one delivery did, counted per **recipient** rather than per request.
+
+        There is no status for "courier read this report and had no opinion on it",
+        so the counts carry that distinction instead: an event type courier has read
+        and does nothing about answers `200` with all five at zero, and a provider
+        that is told so by a `2xx` stops retrying it. A soft bounce answers `200`
+        with `ignored` above zero and `recorded` at zero.
+
+        These are **counts and nothing else**. No address, no identifier, no part of
+        the payload: the suppression table has no `account_id` and is not exposed
+        through any route, so a value in here would be a way to ask courier questions
+        about mailboxes it holds.
+      properties:
+        received:
+          type: integer
+          minimum: 0
+          description: |
+            Reports the payload contained, one per recipient. A broadcast to five
+            addresses is `5`, because the unit courier acts on is one address.
+        recorded:
+          type: integer
+          minimum: 0
+          description: |
+            Suppression rows newly written. This is the number that stops courier
+            mailing that mailbox.
+        duplicates:
+          type: integer
+          minimum: 0
+          description: |
+            Reports courier already held. A redelivery is a normal event and is
+            answered `200`, never a `409` — a provider retrying a report courier has
+            has done nothing wrong.
+        ignored:
+          type: integer
+          minimum: 0
+          description: |
+            Temporary failures (RFC 5321 §4.2.2 — mailbox full, greylisted). courier
+            records **nothing** about these on purpose: suppressing on one is how a
+            suppression list starts eating live addresses.
+        events:
+          type: integer
+          minimum: 0
+          description: |
+            `courier.email.bounced` / `courier.email.complained` outbox rows
+            written, in the same transaction as the suppression. Equal to `recorded`
+            except when a report's `Message-ID` names no send courier made, in which
+            case the suppression is recorded and no event is published.
+
+    ResendReport:
+      type: object
+      description: |
+        One Resend deliverability report, as documented at
+        <https://resend.com/docs/webhooks/emails/bounced> and its siblings.
+
+        **This is the provider's schema, not courier's.** courier does not validate
+        it and does not accept fields it does not read — the opposite of
+        `sendMessage`, whose vocabulary is closed and refuses an unknown field. The
+        asymmetry is the point: `sendMessage`'s body is written by a caller who
+        cannot fix a typo after the fact, whereas this body is written by a provider
+        whose schema courier does not control, and refusing a field courier simply
+        has no use for would turn a provider's harmless addition into a delivery
+        courier rejects.
+
+        courier **reads** a closed subset of it, and an event type it has not read
+        is a `422` rather than a silent no-op — so a provider that adds one produces
+        a log line instead of courier quietly recording nothing. That is the
+        fail-closed choice, and it costs a retry loop on a change courier cannot
+        make sense of; the alternative is silence about a change somebody needed to
+        see.
+      required: [type, created_at, data]
+      properties:
+        type:
+          type: string
+          description: |
+            The event. `email.bounced` and `email.complained` are the two courier
+            acts on; `email.delivery_delayed` and the other deliverability events
+            are understood and have no opinion; a type courier has not read is a
+            `422` naming this field.
+          examples: [email.bounced, email.complained, email.delivery_delayed]
+        created_at:
+          type: string
+          description: |
+            When the **report** happened, RFC 3339. Read at the top level rather than
+            from `data`, because `data.created_at` is when the email was sent — hours
+            earlier, and the wrong answer to "when did this address bounce".
+        data:
+          type: object
+          properties:
+            email_id:
+              type: string
+              format: uuid
+              description: |
+                The provider's id for the message. **A broadcast shares one of these
+                across every recipient**, which is why courier's deduplication key
+                also carries the address.
+            message_id:
+              type: string
+              description: |
+                The `Message-ID` courier wrote when it sent the message, quoted back
+                as the provider received it. It is how courier ties the report to the
+                send — and therefore to the `user_id` and notification type an event
+                about it has to carry.
+
+                Optional, and a report without one is not an error: the suppression
+                is recorded and no event is published.
+            to:
+              type: array
+              items: { type: string, format: email }
+              description: |
+                Every recipient the report is about. One suppression per entry, and
+                one entry that is not an address courier could send to refuses the
+                **whole** report rather than half-applying it.
+            bounce:
+              type: object
+              description: Present on `email.bounced` only.
+              properties:
+                type:
+                  type: string
+                  enum: [Permanent, Transient, Temporary, Undetermined]
+                  description: |
+                    `Permanent` stops the send (RFC 5321 §5.1.1). The other three are
+                    temporary and courier records **nothing** about them — including
+                    `Undetermined`, which is a *known* value meaning "the provider
+                    does not know", and is deliberately read as soft: being told
+                    there was a bounce is not being told the mailbox is gone. A value
+                    outside this list is a `422`, so a provider that adds one is
+                    visible rather than silently soft.
+                subType: { type: string }
+                message: { type: string }
+                diagnosticCode:
+                  type: array
+                  items: { type: string }
+                  description: |
+                    The receiving server's own SMTP replies. Kept because "5.1.1
+                    does not exist" is the sentence an operator actually needs, and
+                    it lands in courier's logs rather than in the suppression row.
+
     NotificationType:
       type: string
       enum: [welcome, password_reset, team_invitation]
@@ -559,7 +1624,40 @@ components:
                 description: The path in the *request*, which is what the caller can fix.
               code:
                 type: string
-                enum: [invalid_format, taken, blocked_scheme, blocked_host, blocked_address, dns_failure]
+                # Additive. `unknown_field`, `required` and
+                # `unknown_notification_type` are `sendMessage`'s, and each earns
+                # its place: `CourierWeb.Messages` has a closed vocabulary, so a
+                # key courier does not read (`account_id`, a misspelled
+                # `emai_enabled`) is a refusal the caller can act on rather than a
+                # field silently discarded — and a client that switches on `code`
+                # needs to tell "you sent me a field I do not have" from "the value
+                # in a field I do have is wrong".
+                #
+                # `notification_preferences_disabled` is the one code here that is
+                # not about syntax at all, and it is here rather than nowhere
+                # because `errors[]` is core's only machine-readable extension and
+                # a declined preference is a per-field refusal a client has to be
+                # able to act on. The alternative was a 409 indistinguishable from
+                # a suppressed mailbox, which is worse: two different remedies
+                # behind one code.
+                #
+                # The last three are `receiveResendReport`'s, and they are the same
+                # argument from the other direction. That operation's `errors[]` is
+                # courier declining to ACT on a report it read, and a provider has
+                # to be able to tell "you have introduced an event type courier does
+                # not read" from "you sent a bounce type courier does not know" from
+                # "one of your addresses is malformed" — three provider-side
+                # changes with three different fixes. A single `invalid_format`
+                # behind all three is a code that tells a sender nothing, and a
+                # refusal a reader cannot act on is a note rather than a diagnosis.
+                enum: [invalid_format, taken, blocked_scheme, blocked_host, blocked_address, dns_failure, unknown_field, required, unknown_notification_type, notification_preferences_disabled, unsupported_event, unknown_bounce_type, invalid_recipient]
+              detail:
+                type: string
+                description: |
+                  Why this one field was refused, when courier has something to add
+                  to `code` — a bad `limit` reads "is not a positive integer"
+                  rather than only `invalid_format`. Present on some entries and
+                  not on others, so a client must not require it.
 
   responses:
     BadRequest:
@@ -567,6 +1665,16 @@ components:
         The body was not the shape courier was sent. This is 400 and not 422
         because a client could not have known: the request never parsed, so
         there is no field to name and nothing to correct.
+
+        **On `receiveResendReport` this response is reachable only with a valid
+        signature**, and that is the security property rather than a limitation: the
+        signature is verified before the body is read, and the endpoint's parser is
+        deliberately skipped for that route, so an unsigned malformed body is a
+        `401` and is told nothing about whether courier could have read it. This
+        response is also what a body **larger than courier will read** gets — 1 MiB,
+        a bound that exists because the route is unauthenticated and an unbounded
+        read is a denial of service handed to whoever finds the URL, while every
+        documented provider report is a few kilobytes.
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
@@ -578,10 +1686,34 @@ components:
             code: bad_request
             trace_id: 0af7651916cd43dd8448eb211c80319c
 
+    NotAcceptable:
+      description: |
+        The request's `Accept` header does not include `application/json`, so
+        Phoenix's `:accepts` plug refused to route it. This is the client naming a
+        media type courier cannot answer, and courier says so with
+        `not_acceptable` rather than with `internal`: an earlier version of courier
+        fell through to the `:internal` default here and reported a client that had
+        asked for `text/html` as courier having failed, which is the one code every
+        generated client retries. Reachable on every operation in this document.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          example:
+            type: https://errors.cafaye.com/not_acceptable
+            title: Not acceptable
+            status: 406
+            detail: courier answers application/json.
+            code: not_acceptable
+            trace_id: 0af7651916cd43dd8448eb211c80319c
+
     Unauthorized:
       description: |
         No authenticated caller. courier does not guess an account for an
         anonymous request.
+
+        **Not this operation's 401.** `receiveResendReport` authenticates by
+        signature rather than by token, and its 401 means something else — see
+        `SignatureRejected`, which is a response of its own for exactly that reason.
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
@@ -591,6 +1723,154 @@ components:
             status: 401
             detail: This request needs an authenticated caller.
             code: unauthorized
+            trace_id: 0af7651916cd43dd8448eb211c80319c
+
+    SignatureRejected:
+      description: |
+        The request did not carry a valid **provider signature**, so courier did not
+        read it and **recorded nothing**. This is `receiveResendReport`'s 401, and
+        it is a response of its own rather than the `Unauthorized` every other
+        operation shares, because the two mean different things: that one is "no
+        bearer token", this one is "not from the provider".
+
+        **The signature is checked before the body is parsed, and nothing upstream
+        decodes it either** — this operation's body is deliberately left unparsed by
+        the endpoint's `Plug.Parsers`, so the bytes that arrive are the bytes that
+        were signed. Two consequences a client should read twice:
+
+          * **a forged request is told nothing about its payload.** An unsigned
+            request carrying malformed JSON gets this, not a `400`. A `400` would
+            confirm that courier decoded a body nobody authenticated;
+          * **a correctly-signed request carrying malformed JSON gets a `400`
+            instead.** This response is reachable *with* a valid signature, and the
+            body's `400` is reachable only that way.
+
+        The `detail` names courier's own reason and **never repeats a value from the
+        request** — an echoed signature, id or timestamp is an oracle telling a
+        forger which part to fix. The specific reason is in courier's logs under the
+        same `trace_id`.
+
+        **It is not courier's misconfiguration.** A courier that holds no signing
+        secret, or one it cannot decode, answers `500` instead: a route answering
+        401 to its own misconfiguration is indistinguishable from one under attack,
+        and the operator's first question would be the wrong one. See the
+        operation's description.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          example:
+            type: https://errors.cafaye.com/unauthorized
+            title: Unauthorized
+            status: 401
+            detail: >-
+              This request did not carry a valid provider signature, so courier did
+              not read it. The signature does not match the body received.
+            code: unauthorized
+            trace_id: 0af7651916cd43dd8448eb211c80319c
+
+    ReportNotActionable:
+      description: |
+        The request **was** authentic and courier **did** read it, and it will not
+        act on it — an event type courier has not read, a bounce type outside the
+        documented vocabulary, a field the report needs and does not carry, or an
+        address that is not an address courier could send to.
+
+        A `422` and not a `200` is the whole decision. A `200` would be courier
+        claiming it did something with a report it could not read, which is the
+        silence `Courier.Inbound.Resend` refuses: a provider that adds an event type
+        should produce a log line, not nothing. A `422` tells the provider courier
+        understood the request and will not act on it.
+
+        A `422` and not a `400` is core's own line — 400 is for malformed syntax
+        there is no field to name for, and this report is well-formed. The body that
+        is not JSON at all is a `400` instead, and only a **signed** one can reach
+        it.
+
+        `errors[].code` says which refusal, and `errors[].field` is named as the
+        provider's own documentation spells it (`bounce`, `to`, `type`, …) rather
+        than as a path into courier's envelope: the sender wrote `bounce`, not
+        `data.bounce`, and a field a sender cannot find in the body it sent is not a
+        field it can fix.
+
+        **No value from the payload is echoed.** In particular a rejected address is
+        not quoted back — it is in courier's logs, and the response says only that
+        one of the addresses is not one courier could send to. The suppression table
+        has no `account_id` and is not exposed through any route, so an address in a
+        response body would be a way to query mailboxes courier holds.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          examples:
+            unclassifiable_event:
+              summary: An event type courier has not read
+              value:
+                type: https://errors.cafaye.com/validation_failed
+                title: Validation failed
+                status: 422
+                detail: >-
+                  courier could not act on this report. It is an event type courier
+                  has not read, and courier does not act on an event it cannot
+                  classify.
+                code: validation_failed
+                trace_id: 0af7651916cd43dd8448eb211c80319c
+                errors:
+                  - field: type
+                    code: unsupported_event
+            unknown_bounce_type:
+              summary: A bounce type outside the documented vocabulary
+              value:
+                type: https://errors.cafaye.com/validation_failed
+                title: Validation failed
+                status: 422
+                detail: >-
+                  courier could not act on this report. Its bounce type "Ragequit" is
+                  not one of the types courier has read.
+                code: validation_failed
+                trace_id: 0af7651916cd43dd8448eb211c80319c
+                errors:
+                  - field: bounce
+                    code: unknown_bounce_type
+            bad_recipient:
+              summary: An address that is not one courier could send to
+              value:
+                type: https://errors.cafaye.com/validation_failed
+                title: Validation failed
+                status: 422
+                detail: >-
+                  courier could not act on this report. One of the addresses it names
+                  is not an address courier could send to.
+                code: validation_failed
+                trace_id: 0af7651916cd43dd8448eb211c80319c
+                errors:
+                  - field: to
+                    code: invalid_recipient
+
+    ReportNotRecorded:
+      description: |
+        courier read the report and **could not write it**. The transaction unwound,
+        so nothing is half-recorded: no suppression without its event, and no event
+        about a mailbox courier does not hold.
+
+        `503` and not `500`, and the same argument `sendMessage`'s `503` makes:
+        courier is fine and its database is not, which is the whole difference
+        between a provider retrying and a provider filing a bug against courier.
+
+        **The retry is safe and it is the designed path, not a fallback.** The
+        deduplication is a unique index, so a redelivery of a report courier already
+        holds is answered `200` with `data.duplicates` above zero and writes
+        nothing. A provider that receives this should retry the same bytes.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          example:
+            type: https://errors.cafaye.com/unavailable
+            title: Service unavailable
+            status: 503
+            detail: >-
+              courier could not record this report, so nothing was written and no event
+              was published. The report is safe to retry: delivery is at-least-once and
+              the same report recorded twice is one row.
+            code: unavailable
             trace_id: 0af7651916cd43dd8448eb211c80319c
 
     NotFound:
@@ -609,10 +1889,192 @@ components:
             code: not_found
             trace_id: 0af7651916cd43dd8448eb211c80319c
 
+    NotificationPreferencesNotFound:
+      description: |
+        The preferences for this user id exist and belong to another account.
+
+        Not a 403, for the reason the webhook `NotFound` above gives: a 403 would
+        tell a caller that this user id has preferences at all, which is the only
+        fact this 404 exists to withhold.
+
+        It is deliberately **narrow**. A user nobody has written preferences for is
+        a `200` with the defaults on both operations, because courier holds no
+        foreign key to identity's users and cannot tell an account's user from one
+        that does not exist. This response means "there is something here and it is
+        not yours", and only a stored row can make it true.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          example:
+            type: https://errors.cafaye.com/not_found
+            title: Not found
+            status: 404
+            detail: No notification preferences with that user id.
+            code: not_found
+            trace_id: 0af7651916cd43dd8448eb211c80319c
+
+    IdempotencyKeyReused:
+      description: |
+        The client sent an `Idempotency-Key` it has already used on this endpoint
+        **with a different body**. Core's conventions: "Replay with the same key
+        but a different body returns 409 `idempotency_key_reused`."
+
+        A client bug, and the fix is in the request: either send the original body
+        again to get the original response, or choose a new key. courier will not
+        guess which of the two bodies was intended.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          example:
+            type: https://errors.cafaye.com/idempotency_key_reused
+            title: Idempotency key reused
+            status: 409
+            detail: That Idempotency-Key was already used for a different request body.
+            code: idempotency_key_reused
+            trace_id: 0af7651916cd43dd8448eb211c80319c
+
+    Conflict:
+      description: |
+        The client sent an `Idempotency-Key` whose first request on this endpoint
+        is **still being processed**, so there is no stored response to replay
+        yet. Two requests with one key arriving at the same time is not a retry.
+
+        Not `idempotency_key_reused`: the bodies are identical, and telling a
+        client its key was reused with a different body when it was not is the kind
+        of lie a retry loop is built on. Retry the same request with the same key
+        shortly and the answer will be the original one.
+
+        Core's `openapi-conventions.md` §Idempotency does not describe this case.
+        It is courier's, and `conflict` is a code core already reserves at 409.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          example:
+            type: https://errors.cafaye.com/conflict
+            title: Conflict
+            status: 409
+            detail: That Idempotency-Key is still being processed.
+            code: conflict
+            trace_id: 0af7651916cd43dd8448eb211c80319c
+
+    Internal:
+      description: |
+        courier failed and the client did nothing wrong. **Every operation in this
+        document can answer this one**: it is what `Phoenix.Endpoint.RenderErrors`
+        renders for any unhandled raise, including a database that has stopped
+        answering. The envelope is courier's and carries the request's
+        `trace_id`; the cause is in courier's logs under that id and is not
+        repeated to the caller, because these bodies are read by anyone who can
+        reach the service.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          example:
+            type: https://errors.cafaye.com/internal
+            title: Internal server error
+            status: 500
+            detail: The request could not be completed.
+            code: internal
+            trace_id: 0af7651916cd43dd8448eb211c80319c
+
+    MessageSuppressed:
+      description: |
+        The recipient's mailbox cannot be written to, and courier will not write
+        to it. **A 409 and not a 422**, because this is not a property of the
+        request: a hard bounce (RFC 5321 §5.1.1, permanent failure) and a spam
+        complaint (RFC 2142 §5, an abuse report) are facts about a *mailbox*,
+        recorded by a provider and not chosen by the caller. 409 `conflict` is
+        core's own code for a request colliding with the current state of a
+        resource, and it is the status that tells a generated client **not to
+        retry**.
+
+        The suppression list is not exposed through any route, so this response is
+        the only place the fact surfaces, and it is shaped accordingly: it does
+        **not** echo the address, and it carries no `errors[]`, because core
+        reserves that for 422 and this is not a field failure. The two states are
+        described in `detail` in words only — an operator's response to each is
+        different (a pile of `undeliverable` is list hygiene, a pile of complaints
+        is a content and sender-reputation problem), and a machine-readable code
+        here would turn this response into the one place a caller could probe the
+        list.
+
+        `email_suppressions` carries no `account_id` by design, so this is a fact
+        about a mailbox rather than about another tenant's data, and it is the same
+        posture the send path takes when it answers "no mail went out" rather than
+        "here is a list".
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          examples:
+            undeliverable:
+              summary: The mailbox hard-bounced a previous message
+              value:
+                type: https://errors.cafaye.com/conflict
+                title: Conflict
+                status: 409
+                detail: >-
+                  That mailbox does not exist: it hard-bounced a previous message,
+                  and courier does not write to a mailbox that has said it is gone.
+                code: conflict
+                trace_id: 0af7651916cd43dd8448eb211c80319c
+            complained:
+              summary: The recipient reported a previous message as spam
+              value:
+                type: https://errors.cafaye.com/conflict
+                title: Conflict
+                status: 409
+                detail: >-
+                  That recipient reported a previous message as spam. courier does
+                  not write to someone who has asked not to be written to.
+                code: conflict
+                trace_id: 0af7651916cd43dd8448eb211c80319c
+
+    Unavailable:
+      description: |
+        The mail provider did not accept the message, or courier is not
+        configured to deliver at all. **503 and not 500**, because courier is fine
+        and its dependency is not — which is the whole difference between a
+        generated client retrying and a generated client filing a bug against
+        courier.
+
+        Two causes, and a caller cannot tell them apart and does not need to:
+
+          * **the provider refused** — a relay that returned an error, a credential
+            it rejected, a socket that would not open;
+          * **courier cannot deliver** — `COURIER_MAIL_ADAPTER` names an adapter
+            that never opens a socket, or names none.
+
+        **The retry is safe in both cases**: nothing was sent, and no outbox row
+        was written, so nothing claims a delivery that did not happen. A failed
+        request also *releases* its `Idempotency-Key` rather than storing the
+        failure, so retrying with the same key is not locked out for 24 hours.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          example:
+            type: https://errors.cafaye.com/unavailable
+            title: Service unavailable
+            status: 503
+            detail: >-
+              The mail provider did not accept the message. Nothing was sent and
+              nothing was recorded, so this request is safe to retry with the same
+              Idempotency-Key.
+            code: unavailable
+            trace_id: 0af7651916cd43dd8448eb211c80319c
+
     ValidationFailed:
       description: |
         The request was well-formed and the thing it asked for is not allowed.
         `errors[].code` distinguishes a typo from a refused destination.
+
+        On `sendMessage` this is also where a **declined preference** is answered,
+        with `errors[0].code` `notification_preferences_disabled` and
+        `errors[0].field` `type`. That is the opposite status from a suppressed
+        mailbox, and deliberately so: a decline is visible through
+        `GET /v1/notification_preferences/{user_id}` and changeable through the
+        `PUT` beside it, so telling the caller to change something is the accurate
+        answer — and `errors[]`, which core reserves for 422 and nothing else, is
+        where a client can read that without parsing prose.
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }

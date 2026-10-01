@@ -3,7 +3,7 @@
 // Source: specs/pantry.yaml
 //         pantry, document version 1.1.0,
 //         vendored from git@github.com:cafaye/pantry.git
-//         at commit 123afca1cd63c99d24347c032026e11feb75d3d8
+//         at commit f009b8e2a968f5b1179bb40ca95270033986b6e3
 // Regenerate: npm run generate
 //            test/regeneration.test.mjs proves regeneration is a no-op,
 //            and that a hand-edit here is reverted by it.

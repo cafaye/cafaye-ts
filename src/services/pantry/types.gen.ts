@@ -3,7 +3,7 @@
 // Source: specs/pantry.yaml
 //         pantry, document version 1.1.0,
 //         vendored from git@github.com:cafaye/pantry.git
-//         at commit 123afca1cd63c99d24347c032026e11feb75d3d8
+//         at commit f009b8e2a968f5b1179bb40ca95270033986b6e3
 // Regenerate: npm run generate
 //            test/regeneration.test.mjs proves regeneration is a no-op,
 //            and that a hand-edit here is reverted by it.
@@ -127,17 +127,25 @@ export type Owner = {
  * | no `exposes.api`, some event work | `worker` |
  * | no contract surface, and the repository serves HTTP | `api` |
  * | no contract surface, and the repository is a binary | `cli` |
+ * | no contract surface, and it is an installed artifact with no entry point | `cli` |
  *
- * The last two rows are **curated**, not derived, and they are the only
- * curated values. A manifest that declares no contract surface cannot say
- * which one it is: `guard` (a gateway whose OpenAPI document has not been
- * written yet) and `caf` (a binary) declare the same absence of surface,
- * and `language` names a toolchain rather than a shape. `cafaye-rb` — a
- * gem, not a registry entry — has the same shape a third time.
+ * The last three rows are **curated**, not derived, and they are the only
+ * two curated values. A manifest that declares no contract surface cannot
+ * say which one it is: `guard` (a gateway whose OpenAPI document has not
+ * been written yet), `caf` (a binary) and `cafaye-ts` (a package other
+ * programs import, which serves nothing and vendors six other
+ * repositories' OpenAPI documents into `specs/`) declare the same absence
+ * of surface, and `language` names a toolchain rather than a shape.
  *
  * A client that routes or deploys by `kind` should branch on it rather
- * than assume every entry serves HTTP: `cli` is an entry `caf dev`
- * installs and nobody routes to.
+ * than assume every entry serves HTTP: `cli` is an entry somebody installs
+ * and nobody routes to.
+ *
+ * The third row is a value the vocabulary does not quite have a word for,
+ * and the two client libraries in the fleet are currently answered
+ * differently — `cafaye-ts` is a `cli` here, and the `cafaye-rb` gem is in
+ * the exclusion record rather than in this list. See `DECISIONS.md` D1.
+ * Neither answer changes the wire format; it changes who is listed.
  *
  */
 export type ServiceKind = 'api' | 'worker' | 'both' | 'cli';
@@ -202,11 +210,12 @@ export type ListServicesData = {
         /**
          * Narrow to services of one kind. `api` serves HTTP and consumes
          * nothing, `worker` has no declared HTTP surface and does event work,
-         * `both` serves HTTP and consumes events, and `cli` is a binary —
-         * installed and run rather than brought up and routed to. `api` and
-         * `cli` are also the two curated values: a service whose manifest
-         * declares no contract surface is one of those two by a recorded
-         * judgement rather than by derivation.
+         * `both` serves HTTP and consumes events, and `cli` is an installed
+         * artifact — a binary, or a package other programs import — rather
+         * than something brought up and routed to. `api` and `cli` are also
+         * the two curated values: an entry whose manifest declares no contract
+         * surface is one of those two by a recorded judgement rather than by
+         * derivation.
          *
          */
         kind?: ServiceKind;
