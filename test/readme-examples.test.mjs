@@ -36,6 +36,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { before, describe, it } from 'node:test';
 
+import { REQUIRED_OPERATIONS } from '../scripts/lib/capability.mjs';
 import { REPO_ROOT, readIndex } from '../scripts/lib/specs.mjs';
 
 const index = await readIndex();
@@ -201,10 +202,32 @@ describe('the README documents things that work', () => {
     // The README carries a table of operation counts. A table is a claim, and a
     // stale table is worse than none: a reader comparing it against their own
     // service would conclude the client was wrong.
+    //
+    // THE TABLE IS FOUND BY ITS HEADING, not by "the first line that starts with
+    // `| \`identity\`\`". That looser locator was in here until cafaye-ts-02b, and
+    // it broke the moment a second table appeared earlier in the document: the
+    // README's new "What you cannot do through this client yet" section has a row
+    // about `identity`'s tenancy, the locator found THAT, and the test reported
+    // the README as claiming 10 operations where the index records 31. The
+    // finding was a real mismatch in the file and the wrong row entirely — a
+    // test that locates its subject by a prefix is a test that will one day
+    // assert about a different table, and it will do it loudly and wrongly.
+    //
+    // So: the section heading, then the rows under it, and nothing else. If the
+    // heading goes away the test says so rather than quietly finding nothing.
+    const section = readme.split('\n## What is in the box');
+    assert.equal(
+      section.length,
+      2,
+      "the README has no unique '## What is in the box' heading, so this test cannot find the " +
+        'operation-count table without guessing',
+    );
+    const rows = section[1].split('\n').slice(1);
+
     for (const service of SERVICES) {
       const expected = index.services.find((s) => s.service === service);
-      const row = readme.split('\n').find((line) => line.startsWith(`| \`${service}\``));
-      assert.ok(row, `the README has no row for ${service}`);
+      const row = rows.find((line) => line.startsWith(`| \`${service}\``));
+      assert.ok(row, `the README's operation table has no row for ${service}`);
       assert.match(
         row,
         new RegExp(`\\|\\s*${expected.operations}\\s*\\|`),
@@ -212,6 +235,81 @@ describe('the README documents things that work', () => {
           `records (${expected.operations}). One of them is stale.`,
       );
     }
+  });
+
+  it("the README's 'what you cannot do yet' table names counts the capability check agrees with", () => {
+    // The second table is a claim too, and it is a claim about a gap, which is the
+    // kind of claim that rots quietly: an operation gets documented upstream, the
+    // README keeps saying 10, and a reader plans around a gap that closed months
+    // ago.
+    //
+    // So the numbers are read out of `scripts/lib/capability.mjs` rather than
+    // written here, and compared. An operation documented upstream moves the
+    // module's step counts, this test fails with a number, and the README is
+    // fixed — rather than a reader planning around a gap that closed months ago.
+    const heading = "## What you cannot do through this client yet";
+    assert.equal(
+      readme.split(`\n${heading}`).length,
+      2,
+      `the README has no unique '${heading}' section, so its gap counts cannot be checked`,
+    );
+    // Bounded to THIS section, not to the rest of the document. `split` on the
+    // heading alone returns everything after it — the operations table, the
+    // provenance block, the rest of the file — and the first version of this test
+    // counted eight rows in "the gap table" for exactly that reason. A locator
+    // that reaches past the thing it is looking for is the same defect as one
+    // that stops short of it.
+    const body = readme.split(`\n${heading}`)[1].split(/\n## /)[0];
+
+    // The module is imported rather than re-read as text: the required set is
+    // data, and a test that parsed it out of the source with a regular expression
+    // would be a second implementation of "what is required" that can disagree.
+    //
+    // The counts are derived by STEP rather than by scanning for a shape, because
+    // the two gaps are steps — 2 and 3 are identity's tenancy, 5 is its OIDC
+    // surface — and a step number is a name this test and
+    // `scripts/lib/capability.mjs` both already use. Courier is step 6 and is
+    // deliberately not in the README's table: it is fully callable, which is a
+    // claim `test/customer-capability.test.mjs` makes and asserts.
+    const countForSteps = (...steps) =>
+      REQUIRED_OPERATIONS.filter((r) => steps.includes(r.step)).length;
+
+    for (const [label, steps] of [
+      ['tenancy', [2, 3]],
+      ['OpenID Connect', [5]],
+    ]) {
+      const count = countForSteps(...steps);
+      const row = body.split('\n').find(
+        (line) => line.includes(`| ${count} |`) && line.toLowerCase().includes(label.toLowerCase()),
+      );
+      assert.ok(
+        row,
+        `the README's gap table has no '${label}' row saying ${count}, which is what ` +
+          `scripts/lib/capability.mjs requires for step(s) ${steps.join(' and ')}`,
+      );
+    }
+
+    // And the two OWNERS, because a count without an owner is the thing this
+    // section exists to prevent. One row must put the work upstream and one must
+    // put it here, because the two gaps have nothing in common except that they
+    // are both real.
+    const gapRows = body.split('\n').filter((line) => line.startsWith('| ') && /\| \d+ \|/.test(line));
+    assert.equal(
+      gapRows.length,
+      2,
+      `the README's gap table has ${gapRows.length} counted rows, not 2. A third means a third ` +
+        'document is not vendored, or a gap closed and the section is stale.',
+    );
+    assert.ok(
+      gapRows.some((line) => line.includes('`identity`') && line.includes('serves')),
+      'no row says the tenancy gap is `identity`\'s, which is the half of the finding that is ' +
+        'NOT this package\'s to fix',
+    );
+    assert.ok(
+      gapRows.some((line) => line.includes('This package')),
+      'no row says the OIDC gap is this package\'s, which is the half a reader most needs to know ' +
+        'they can act on',
+    );
   });
 
   it('the README\'s TypeScript examples actually compile', async () => {

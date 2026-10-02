@@ -79,6 +79,36 @@ jobs:
       - name: bin/prime
         run: ./bin/prime
 
+      - name: what a customer cannot do through this client
+        # ALWAYS runs, and it is not a gate. `bin/prime` above is RED, on
+        # purpose, and a red step that stops the job tells a reader only that
+        # something failed. This step prints the finding as a list — the
+        # operations, in order, with the reason each one is on a customer's path
+        # and whose it is — so the reason for the red is in the log rather than in
+        # a report nobody opens.
+        #
+        # It is `npm run capability` and not a second implementation: the script
+        # and `test/customer-capability.test.mjs` both import
+        # `scripts/lib/capability.mjs`, so the list in the log and the assertions
+        # in the suite cannot disagree about what is missing. It exits nonzero by
+        # design, which is what `continue-on-error` is for — a second gate on top
+        # of the first one would be a gate that cannot be satisfied while the
+        # product is what it is.
+        if: always()
+        continue-on-error: true
+        run: npm run capability
+
+      - name: the capability check is load-bearing
+        # Proves the red above is a measurement rather than a constant: a document
+        # edited and regenerated goes green, a HAND-WRITTEN method does not, and a
+        # fix for one finding does not close the other. `continue-on-error` here
+        # too — it needs `node_modules` and the generator, and a job that cannot
+        # run it should say so rather than fail for a reason the log does not
+        # carry. Locally: `mise run capability-self-test`.
+        if: always()
+        continue-on-error: true
+        run: bash test/capability_self_test.sh
+
       - name: The vendored documents still match specs/index.json
         # The one check CI can do that a local run usually does not need: it runs
         # against a fresh clone of THIS repository, where nothing has been

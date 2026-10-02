@@ -29,8 +29,11 @@ specs/index.json       PROVENANCE. repository, path, 40-char commit sha, sha256 
 specs/<service>.yaml   the six vendored documents, verbatim copies, committed
 scripts/lib/specs.mjs  the one implementation of "what a vendored document is" and how to measure it
 scripts/lib/workspace.mjs  where the six checkouts are, and how to read a document out of one at a sha
+scripts/lib/dist.mjs   load the BUILT package, the way a consumer loads it
+scripts/lib/capability.mjs  what a customer must be able to DO through this client, and the four verdicts
 scripts/vendor.mjs     re-vendor, at the recorded shas. One command, all six, atomic
 scripts/generate.mjs   run the generator for every service in the index
+scripts/capability.mjs `npm run capability` — the answer as a list, for a person rather than a gate log
 scripts/verify-specs.mjs  check the documents against the index; write nothing
 scripts/e2e-identity.mjs  drive a REAL identity against a REAL Postgres. Not in the gate
 src/index.ts           the public entrypoint: Cafaye, the error types, the six namespaces
@@ -41,9 +44,21 @@ src/cafaye/errors.ts   the RFC 9457 exception hierarchy
 src/cafaye/redact.ts   the scrubber, and safeCause
 src/cafaye/services.ts the six generated namespaces, imported exactly once
 src/services/<name>/   GENERATED, COMMITTED. 16 files per service, 96 in total
-test/                  five properties, the drift check, the README's examples, and seven wrapper files
+test/                  five properties, the drift check, the customer's path, the README's examples, and seven wrapper files
 bin/prime              the gate: npm ci, typecheck, the full test suite
 ```
+
+`test/lib/dist.mjs` is a re-export of `scripts/lib/dist.mjs` and nothing else.
+It stayed behind when the implementation moved — `scripts/capability.mjs` needs the
+same built-package loader, and a script reaching into `test/` for its own loader
+would make the test directory a library the shipped scripts depend on. Seven test
+files import it and none of them changed, which is the point of leaving a
+re-export rather than editing a call site seven times.
+
+**What is in the customer path, and the two failures that are the finding.** See
+"What a customer cannot do through this client" below. `bin/prime` is **red**,
+deliberately, and the reasoning is written down in `gate.yml` next to the floor
+that counts it.
 
 `scripts/lib/workspace.mjs` exists because `scripts/vendor.mjs` and
 `test/spec-drift.test.mjs` both need to know where the fleet is and how to read a
@@ -400,6 +415,77 @@ in its header. That is drift in the direction the drift test does not cover: not
 "the copy is old" but "the document is incomplete". Closing it means editing
 identity's document, which this repository does not own.
 
+**`expectOperations` is a tripwire on SIZE, not a lock on the surface, and the
+difference is measured.** A document that loses one operation and gains another
+moves no count. `npm run vendor` re-measures, sees `31 === 31`, updates the
+index's `operations`, `paths`, `bytes` and `sha256` from the new bytes, writes it
+and reports success; `npm run verify:specs` then agrees with itself; regeneration
+is a clean no-op against the new tree; `test/regeneration.test.mjs` passes,
+because the committed tree IS what the pinned generator produces; and a client
+has silently lost a method. All of that was run, in a throwaway copy, and the
+tree it produced was missing `liveness` and had a `createWidget` nobody wrote.
+`REPORT-cafaye-ts-02b.md` §5 has the commands.
+
+The alternative is a set rather than a count, and it is not in place: it needs a
+per-operation record in `specs/index.json`, which is a schema change and a
+migration of six entries. Until then `test/customer-capability.test.mjs` is the
+partial answer — it names twenty-three operations a customer needs, so a swap
+that touches one of them is red. A swap that touches none of them is not. That
+sentence is the honest scope of the protection, and the README says it too.
+
+## What a customer cannot do through this client
+
+Added by cafaye-ts-02b, and it is the answer to a question every other check in
+this repository is silent about: not "is the pipeline in order" but "can the
+product be bought".
+
+**A generated client is exactly as capable as the documents it was generated
+from.** `identity` serves ten tenancy operations — `POST` and `GET /v1/accounts`,
+`GET`/`PATCH`/`DELETE /v1/accounts/{account_id}`, `GET
+/v1/accounts/{account_id}/members`, `POST
+/v1/accounts/{account_id}/invitations`, `PATCH` and `DELETE
+/v1/accounts/{account_id}/members/{user_id}`, `POST /v1/invitations/accept` — and
+its `openapi/v1.yaml` describes **none** of them. Its own
+`internal/httpapi/openapi_drift_test.go` holds all ten in a `knownDrift` map whose
+comment says the list "cannot grow and cannot be emptied", and its `cafaye.yml`
+carries a DECISION NEEDED (D1) describing them as served "and written down in no
+document". So this client can `listApiKeys` and `registerOidcClient` and has no
+way to make the account those belong to. `parlor` — the launch-scope product —
+has all ten hand-written in `src/lib/identity.ts`, transcribed from identity's Go
+handler, with a comment saying that is why.
+
+**`test/customer-capability.test.mjs` states that as a failing test**, with the
+required set in `scripts/lib/capability.mjs` carrying a reason per operation and
+a first test that fails if any reason goes missing. Four verdicts, kept apart
+because the two failures have different owners: `present`, `absent-from-client`
+(**this repository** — the document says it and the client does not, so the
+generator or the pipeline lost something), `absent-from-document` (**the
+service** — regenerating cannot help), and `no-vendored-document` (**this
+repository, structurally** — `specs/index.json` records one `path` per service, so
+`identity`'s second document, `openid/openid.yaml`, and the nine OpenID Connect
+operations in it, can never be vendored by any bump).
+
+**Never hand-write the method.** Case 2 of `test/capability_self_test.sh` writes
+`createAccount` into a copy of `sdk.gen.ts` **and** into the generated `index.ts`
+— the entry file re-exports by name, so one edit is not even visible to a
+consumer — and asserts the check is still red, naming the method and the verdict
+beside each other. A method whose generated siblings are absent is a lie about
+what the document says, and the next `npm run vendor` reverts it.
+
+**The check is proven in both directions** by `mise run
+capability-self-test`: a control that must be red with both named verdicts, a
+document edited and regenerated that must be GREEN for tenancy and still red for
+OIDC, the hand-written method above, and nine-of-ten documents red again naming
+one operation. It is outside `prime` because `bin/prime` runs `npm test` and the
+glob `test/**/*.test.mjs` cannot match a `.sh` — a self-test inside the gate would
+mean the gate runs the check that fails on purpose.
+
+**`bin/prime` is red and that is the deliverable.** `# tests 210  # pass 208  #
+fail 2  # skipped 0`. `gate.yml`'s `suite-pass` floor is 208, and the paragraph
+beside it says what the two failures are and that `test.skip` and a lowered floor
+are both the wrong repair. `REPORT-cafaye-ts-02b.md` separates what this
+repository can fix from what only `identity` can, and does not blur them.
+
 ## Gates
 
 ```sh
@@ -414,11 +500,15 @@ suite tests the pipeline and the pipeline does not compile its own output. The
 type check is the only step that looks at all 96 generated files — and the whole
 of `src/cafaye/` — as TypeScript.
 
-The current floor is **201 pass, 0 fail, 0 skipped**. cafaye-ts-01's baseline was
-67; do not go below the current number, and do not fix a red test by loosening an
-assertion, raising a retry or adding a sleep.
+The current floor is **208 pass, 0 skipped, 2 fail**. cafaye-ts-01b's baseline
+was 201; cafaye-ts-02b added `test/customer-capability.test.mjs`, which is six
+green tests and two that are **red on purpose** — that is the finding, not a
+defect, and the section above says which two. Do not go below the current
+number, and do not fix a red test by loosening an assertion, raising a retry or
+adding a sleep. **And do not "fix" those two by skipping them:** `# skipped 0` is
+a proof, `test.skip` fails it, and a skipped check is not a passing one.
 
-**`gate.yml` at the root declares that gate, and `minimum: 201` in it is that
+**`gate.yml` at the root declares that gate, and `minimum: 208` in it is that
 floor as a number a machine reads.** It is written against core's
 `schemas/gate.schema.json` and checked by core's `harness/bin/gate-check`, so
 "what gates this repository", "what the gate needs from the machine" and "what
@@ -457,6 +547,32 @@ checker catches each.** It is deliberately not part of `prime`: `bin/prime` runs
 `npm test`, so a self-test inside the gate would mean the gate runs the checker
 and the checker runs the gate. It needs a cafaye/core checkout (`CAFAYE_CORE`, or
 it finds `../core`) and exits **2** rather than skipping if there is not one.
+
+**Two things about it are fixed rather than working by accident, and both were
+found while writing the sibling `capability_self_test.sh` rather than by anything
+looking for them.** Its copies run the whole suite, and `spec-drift.test.mjs`
+resolves the six checkouts relative to the repository it runs in — so a copy under
+`$TMPDIR` skipped eleven times, which failed `suite-no-skip` *and* dropped `# pass`
+by eleven, which failed the floor. Both fired on the control, and the self-test
+reported a red that had nothing to do with `gate.yml`. It now hands every copy a
+`CAFAYE_WORKSPACE`, resolved by importing this repository's own
+`scripts/lib/workspace.mjs` rather than by re-deriving the search order. And its
+case 11 was `edit 'minimum: 187' 'minimum: 188'`, correct when 187 was the floor
+and silently stale since cafaye-ts-01b raised it to 201 — it now reads the live
+number, with `grep -Eo` rather than a `sed` `\+`, because BSD sed reads that as a
+literal plus and the case therefore only worked on Linux.
+
+**Its control no longer requires the gate to exit 0, and that is the consequence
+of this packet rather than a loosening.** The suite is red on purpose, so the
+exit code carries no signal. What the control requires instead is stronger where
+it counts: both count-bearing proofs satisfied, and `gate.nonzero` the *only*
+finding that fired. Case 13's `gate.nonzero` clause is gone, with the removal
+explained at the case rather than made quietly.
+
+**`mise run capability-self-test` proves the capability check is load-bearing**,
+four cases, and its header lists them. Outside `prime` for the same structural
+reason, and it needs `node_modules` but no cafaye checkout, no database and no
+network.
 
 **No sleeps, no raised retries, no loosened assertions.** The deadline tests use
 `node:test`'s mock timers and an injected `fetch`; the only `await` on a

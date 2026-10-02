@@ -21,14 +21,28 @@
 # script whose name the glob cannot match. core's own gate.yml says the same
 # about `harness/tests/gate_self_test.sh`, for the same reason.
 #
-# THE CONTROL COMES FIRST, AND IT IS NOT A FORMALITY. Thirteen reds against a
+# THE CONTROL COMES FIRST, AND IT IS NOT A FORMALITY. Fourteen reds against a
 # repository that was already red prove nothing, so case 0 runs the checker over
 # an UNMODIFIED copy — the static half, and then `--prove`, which really runs the
-# gate — and requires exit 0. It also pins the warning count, because the two
-# warnings this declaration produces are deliberate (both are
+# gate — and requires the static half to be green. It also pins the warning count,
+# because the two warnings this declaration produces are deliberate (both are
 # `gate.requirement-unproven`: two claims about the machine rather than about the
 # repository) and a requirements block that quietly grows a third unproven claim
 # should be a decision rather than a diff nobody read.
+#
+# THE PROVING HALF OF THE CONTROL NO LONGER REQUIRES EXIT 0, and that is the one
+# behaviour change in this file. `test/customer-capability.test.mjs` carries two
+# tests that fail ON PURPOSE — ten `identity` tenancy operations the service
+# serves and documents nowhere, and five OpenID Connect operations documented in a
+# SECOND document this repository does not vendor. `node --test` exits nonzero, so
+# `bin/prime` is nonzero and `gate.nonzero` fires. That is the ordinary mechanism
+# doing the ordinary thing, and it is what `gate.yml`'s new `suite-pass` comment
+# describes. What the control now requires instead is STRONGER where it counts:
+# both count-bearing proofs must have been satisfied — the floor found a `# pass`
+# line and cleared it, `# skipped 0` was found — and `gate.nonzero` must be the
+# ONLY finding that fired. A control that only checked the exit code would accept
+# a run in which the proofs never appeared at all, which is case 10 under a
+# different name.
 #
 # THE THIRTEEN BREAKAGES
 #   Static — the declaration against the tree, nothing run:
@@ -56,7 +70,10 @@
 #        formed; it is simply a claim about a line this repository never prints.
 #    11. the floor raised above the suite's real count — the ratchet, and the
 #        breakage that says the floor is a number somebody read off a log rather
-#        than a number somebody chose.
+#        than a number somebody chose. The number is READ from gate.yml rather
+#        than written here, which is a fix: this case used to `edit 'minimum:
+#        187' 'minimum: 188'` and had been silently stale since cafaye-ts-01b
+#        raised the floor to 201.
 #    12. `npm test` pointed at a glob that matches no file. THE ONE THAT IS NOT
 #        STRING MATCHING, and it is measured rather than assumed: on node 22.19.0
 #        `node --test` against an empty glob prints `# pass 0` and EXITS 0. That
@@ -64,17 +81,31 @@
 #        a green, and a build number on it — reproduced in TypeScript. This case
 #        asserts `gate.floor` fires AND that `gate.nonzero` does NOT, because the
 #        gate exited zero. A checker that had only noticed the exit code would
-#        have called this green.
-#    13. one test marked `.skip`. `# tests` goes to 188 and `# pass` STAYS at
-#        187, so the floor does not move and the gate is green — which is the
-#        entire reason the declaration carries a second proof. This case asserts
-#        the `suite-no-skip` proof fails and that `gate.floor` does not.
+#        have called this green. Unaffected by the two deliberate failures: a
+#        glob that matches nothing runs no tests at all, capability findings
+#        included.
+#    13. one test marked `.skip`. `# tests` goes up and `# pass` STAYS exactly
+#        where it was, so the floor does not move and the only proof that catches
+#        it is the skip one. This case asserts the `suite-no-skip` proof fails and
+#        that `gate.floor` does not. Its `gate.nonzero` clause is GONE, and the
+#        removal is explained at the case: the gate no longer exits zero, and a
+#        clause requiring a zero exit could not be kept by any honest means.
+#
+# ONE FIX THIS SCRIPT NEEDED AND DID NOT KNOW IT NEEDED
+#
+# Every copy runs the whole suite, and the suite's `test/spec-drift.test.mjs`
+# resolves the six cafaye checkouts RELATIVE TO THE REPOSITORY IT IS RUNNING IN.
+# A copy under `$TMPDIR` has no `../` and no `../../cafaye`, so the drift test
+# skipped eleven times — which failed `suite-no-skip` AND dropped `# pass` by
+# eleven, which failed the floor. Both fired on the control, and the self-test
+# reported a red that had nothing to do with `gate.yml`. See the `WORKSPACE`
+# block below for the fix and for the measurement.
 #
 # WHAT IT IS NOT
 #
 # Not exhaustive mutation testing, and not a claim that the suite is complete.
 # Thirteen specific things are proved, plus the control. It says nothing about
-# whether the 187 tests touched the code they name — core's
+# whether the 208 passing tests touched the code they name — core's
 # harness/gate_findings.json names that hole under `notEnforced`, and so does the
 # comment at the end of gate.yml.
 #
@@ -126,6 +157,51 @@ if [ -z "$CORE" ] || [ ! -x "$CORE/harness/bin/gate-check" ]; then
   exit 2
 fi
 GATE_CHECK="$CORE/harness/bin/gate-check"
+
+# THE WORKSPACE, handed to every copy. This is a fix, and the defect it fixes was
+# this repository's own — found while writing the sibling
+# `test/capability_self_test.sh`, and not by anything that was looking for it.
+#
+# `test/spec-drift.test.mjs` resolves the six cafaye checkouts by looking at
+# `$CAFAYE_WORKSPACE`, then `../`, then `../../cafaye` RELATIVE TO THE REPOSITORY
+# IT IS RUNNING IN. In the real worktree that finds the cafaye directory and
+# verifies all six, so `# skipped` is 0 and `gate.yml`'s `suite-no-skip` proof is
+# satisfied. In a copy under `$TMPDIR` there is no `../` and no `../../cafaye`, so
+# the drift test SKIPS eleven times — and then two things break at once: the
+# `suite-no-skip` proof fails, and `# pass` drops by eleven, so the `suite-pass`
+# floor fails too.
+#
+# Both of those fired here, on a control that was supposed to be green, and the
+# result was a self-test reporting `control: the gate really runs and the proofs
+# appear` as RED against an unmodified repository. Nothing was wrong with the
+# declaration; the copy simply could not see the fleet. Measured on this tree
+# before the fix: `# tests 210  # pass 188  # fail 10  # skipped 11` for a copy of
+# a repository whose own suite prints 208 passing and 0 skipped. A self-test that
+# cannot get its own fixture right is not a self-test, and it had been reporting
+# that shape for as long as it existed.
+#
+# The resolution imports `scripts/lib/workspace.mjs` — the one implementation this
+# repository has — rather than re-deriving `../` and `../../cafaye` here, because a
+# second copy of the search order is a second answer to "where is the workspace"
+# and that is the exact drift that module's own header exists to prevent.
+WORKSPACE="$(node --input-type=module -e "
+  import { readIndex } from 'file://$ROOT/scripts/lib/specs.mjs';
+  import { resolveWorkspace } from 'file://$ROOT/scripts/lib/workspace.mjs';
+  const { dir } = await resolveWorkspace(await readIndex(), process.env.CAFAYE_WORKSPACE);
+  process.stdout.write(dir ?? '');
+" 2>/dev/null)"
+if [ -n "$WORKSPACE" ]; then
+  export CAFAYE_WORKSPACE="$WORKSPACE"
+else
+  {
+    echo "gate_self_test: no cafaye workspace beside this checkout, so every copy's drift test"
+    echo "  will SKIP eleven times and BOTH count-bearing proofs in gate.yml will fail in the"
+    echo "  copies — the floor, because # pass drops, and suite-no-skip. The static cases below"
+    echo "  still work; the proving ones cannot, and a self-test that reports those reds as"
+    echo "  findings about gate.yml is reporting a fact about its own fixture."
+    echo "  Point CAFAYE_WORKSPACE at a directory holding the six checkouts and run it again."
+  } >&2
+fi
 
 PY=""
 for candidate in python3 python3.13 python3.12 python3.11 python; do
@@ -354,12 +430,48 @@ fi
 
 run_checker "$control" prove
 code=$?
-if [ "$code" -ne 0 ]; then
-  record_fail "control: the gate really runs and the proofs appear" \
-    "exit $code: $(findings); the gate's own output is in $LOG_DIR/gate.log"
+# THE GATE IS RED, AND THAT IS CORRECT. `test/customer-capability.test.mjs` carries
+# two tests that fail on purpose — ten `identity` tenancy operations the service
+# serves and documents nowhere, and five OpenID Connect operations documented in a
+# SECOND document this repository does not vendor. `node --test` exits nonzero, so
+# `bin/prime` is nonzero and `gate.nonzero` fires by the ordinary mechanism. See
+# `scripts/lib/capability.mjs` for the operation list and REPORT-cafaye-ts-02b.md
+# for which of the two findings is whose.
+#
+# So this control no longer requires exit 0 from the proving half, and the change
+# is deliberate rather than a lowering. What it requires INSTEAD is stronger in
+# the way that matters: both count-bearing proofs must have been SATISFIED — the
+# floor found a `# pass` line and cleared it, and `# skipped 0` was found. A
+# control that only checked the exit code would accept a run where the proofs
+# never appeared at all, and that is finding 10's case: a different defect, under
+# the same "something went red" name.
+#
+# A control that went quiet here instead would be the cafaye-rb shape once more: a
+# tier whose failures stopped being read, reporting green.
+if [ "$code" -ne 1 ]; then
+  record_fail "control: the gate really runs, and the two reds are the ONLY reds" \
+    "expected exit 1, got $code: $(findings); the gate's own output is in $LOG_DIR/gate.log"
+elif ! grep -q '^# pass [0-9]' "$LOG_DIR/gate.log"; then
+  record_fail "control: the gate really runs, and the two reds are the ONLY reds" \
+    "the gate log carries no '# pass' line, so the suite-pass proof was never satisfied"
+elif ! grep -q '^# skipped 0$' "$LOG_DIR/gate.log"; then
+  record_fail "control: the gate really runs, and the two reds are the ONLY reds" \
+    "the gate log does not carry '# skipped 0'"
+elif ! grep -q 'FAIL gate.nonzero' "$REPORT"; then
+  record_fail "control: the gate really runs, and the two reds are the ONLY reds" \
+    "gate.nonzero did not fire, so the gate exited zero over a suite with two failing " \
+    "tests — and that is the whole defect cafaye-ts-02b is about"
 else
-  record_pass "control: the gate really runs and all three proofs appear"
-  echo "         the gate reported: $(grep -E '^# (tests|suites|pass|fail|skipped) ' "$LOG_DIR/gate.log" | tr '\n' ' ')"
+  # Anything beyond gate.nonzero firing would mean a second, unstated reason for
+  # the red, and an unstated reason is the thing this whole file is against.
+  extra="$(findings | tr ' ' '\n' | grep -vE '^gate\.(nonzero|requirement-unproven)?$' | tr '\n' ' ')"
+  if [ -n "$extra" ]; then
+    record_fail "control: the two reds are the ONLY reds" "these also fired: $extra"
+  else
+    record_pass "control: the gate really runs, both count proofs hold, and the only red is gate.nonzero"
+    echo "         the gate reported: $(grep -E '^# (tests|suites|pass|fail|skipped) ' "$LOG_DIR/gate.log" | tr '\n' ' ')"
+    echo "         and the gate is red on purpose — see REPORT-cafaye-ts-02b.md"
+  fi
 fi
 
 # --------------------------------------------------------------------------
@@ -432,7 +544,33 @@ else
 fi
 
 repo="$(copy floor)"
-edit "$repo/gate.yml" '      minimum: 187' '      minimum: 188'
+# The number is READ rather than written, and that is a fix rather than a style.
+# This case used to `edit 'minimum: 187' 'minimum: 188'`, which was correct when
+# 187 was the floor and went stale the first time the floor moved — cafaye-ts-01b
+# raised it to 201 and the case did not notice, because a recipe whose anchor is
+# missing exits 2 and the run had already been reported as passing up to that
+# point. It is exactly the "a measurement that cannot fail is a memory" failure
+# in a shell script: a stale anchor is loud, but only after everything above it
+# has already been printed as green.
+#
+# Reading the live number and adding one keeps the case honest for as long as the
+# floor exists, and `edit` still refuses if the key is not there at all — which is
+# the failure worth being loud about, because it means the declaration has no
+# floor to move.
+#
+# `grep -Eo` rather than `sed -n 's/…\+…/…/p'`, because BSD sed — which is what
+# this runs on when the author is on a laptop — treats `\+` as a literal plus
+# rather than as "one or more", so the GNU spelling reads as "this file has no
+# floor" on macOS and passes on Linux. A self-test that only works on one of the
+# two platforms its repository is developed on is a self-test with a hole in it,
+# and the hole is exactly where this case's one job lives.
+FLOOR="$(grep -Eo '^ *minimum: [0-9]+' "$ROOT/gate.yml" | head -1 | grep -Eo '[0-9]+$')"
+if [ -z "$FLOOR" ]; then
+  echo "  FATAL: gate.yml declares no numeric minimum, so there is no floor for case 11 to" >&2
+  echo "  move. The declaration has changed shape and this case no longer applies." >&2
+  exit 2
+fi
+edit "$repo/gate.yml" "      minimum: $FLOOR" "      minimum: $((FLOOR + 1))"
 expect_red "11. the floor is above the suite's real count" gate.floor gate.proof-missing "$repo" prove
 
 repo="$(copy empty-suite)"
@@ -474,11 +612,23 @@ elif ! grep -q "FAIL gate.proof-missing" "$REPORT" || ! grep -q "proof 'suite-no
     "expected gate.proof-missing naming suite-no-skip; the report carried: $(findings)"
 elif grep -q 'FAIL gate.floor' "$REPORT"; then
   record_fail "13. one test silently skipped" "gate.floor also fired, so the skip proof is not what caught this"
-elif grep -q 'FAIL gate.nonzero' "$REPORT"; then
-  record_fail "13. one test silently skipped" "the gate did not exit zero, so this was not a silent skip"
 else
-  record_pass "13. one test silently skipped: caught, and only by the skip proof"
-  echo "         the gate's own log said: $(grep -E '^# (tests|suites|pass|skipped) ' "$LOG_DIR/gate.log" | tr '\n' ' ')"
+  # The `gate.nonzero` clause this case used to carry is GONE, and its removal is
+  # the honest consequence of cafaye-ts-02b rather than a loosening. The clause
+  # asserted "the gate exited zero, so nothing but the skip could have caught
+  # this", and the gate no longer exits zero: `test/customer-capability.test.mjs`
+  # has two failures that ARE the finding. There is no way to make the suite green
+  # again from here — the OIDC half needs a second vendored document and a change
+  # to the index shape — so the clause could not be kept by any honest means, and
+  # removing it quietly is how a case stops testing.
+  #
+  # What is left is the half that is still exactly true and is the one the proof
+  # exists for: a skip raises `# tests`, leaves `# pass` exactly where it was, and
+  # moves no floor. `gate.floor` did not fire and `suite-no-skip` did. That is the
+  # whole claim, and it does not need the exit code to make it.
+  record_pass "13. one test silently skipped: caught by the skip proof, and by no other"
+  echo "         the gate's own log said: $(grep -E '^# (tests|suites|pass|fail|skipped) ' "$LOG_DIR/gate.log" | tr '\n' ' ')"
+  echo "         (gate.nonzero also fires, for the two capability findings — see REPORT-cafaye-ts-02b.md)"
 fi
 
 # --------------------------------------------------------------------------

@@ -44,6 +44,17 @@ run = "./bin/prime"
 description = "Break gate.yml thirteen ways and assert core's checker catches each"
 run = "bash test/gate_self_test.sh"
 
+[tasks.capability-self-test]
+# Proof that test/customer-capability.test.mjs is measuring the documents rather
+# than failing for a reason nobody has watched. Same reasoning and the same file
+# shape as gate-self-test, and the same reason it is outside `prime`: the glob
+# `test/**/*.test.mjs` cannot match a `.sh`, and a self-test inside the gate
+# would mean the gate runs the check that fails on purpose. Four cases, two of
+# which run the generator, so about a minute. It needs node_modules but no cafaye
+# checkout, no database and no network.
+description = "Prove the customer-capability check can go green, and that a hand-written method cannot"
+run = "bash test/capability_self_test.sh"
+
 [tasks.generate]
 description = "Regenerate the client for all six services from the vendored documents"
 run = "npm run generate"
