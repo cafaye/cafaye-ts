@@ -9,7 +9,120 @@ commit that caused it and the one line that changes to opt back in.
 
 ## [Unreleased]
 
+### Added
+
+- **`test/customer-capability.test.mjs`, and it is failing on purpose.** Fifteen
+  operations a customer needs to buy and use this product with, named one by one,
+  measured against the vendored documents and the generated client. It is in
+  `npm test` and therefore in `bin/prime`, and two of its tests are red:
+  `bin/prime` exits nonzero and `gate.yml`'s `gate.nonzero` fires.
+
+  | Step | Missing | Verdict | Whose |
+  |---|---:|---|---|
+  | Onboard a tenant; invite, accept, list, change and remove members | 10 | `absent-from-document` | **`identity`** — served, documented nowhere |
+  | Integrate this platform's OpenID Connect provider in your own product | 5 | `no-vendored-document` | **this package** — documented in a second document, not vendored |
+
+  The four verdicts are kept apart because the two findings have different
+  owners and different fixes, and a red that names the wrong repository is worse
+  than no red. `npm run capability` prints the same thing as a list, for a
+  person; `test/capability_self_test.sh` (`mise run capability-self-test`) proves
+  the check can go green — by editing a document and regenerating, never by
+  hand-writing a method, which it also proves does not work.
+
+  **Nothing was hand-written into `src/services/`.** A `createAccount` beside
+  absent generated siblings is a lie the next `npm run vendor` reverts, and case
+  2 of the self-test is that exact fact demonstrated.
+
+### Fixed
+
+- **CI prints the finding when the gate is red.** `.github/workflows/ci.yml` runs
+  `npm run capability` and `bash test/capability_self_test.sh` after `bin/prime`,
+  both with `if: always()` and `continue-on-error: true`. `bin/prime` is red on
+  purpose, and a red step that stops a job tells a reader only that something
+  failed; the list is in the log instead of in a report nobody opens. They are
+  reporting, not gating — a report that fails a job is a gate — and both read the
+  same `scripts/lib/capability.mjs` the suite does, so the log and the assertions
+  cannot disagree about what is missing.
+- **`gate.yml` now declares 208 passing, and says what the other two are.** The
+  floor is a ratchet, so it moves in the commit that adds tests: 201 → 208, which
+  is the six new green tests in `test/customer-capability.test.mjs` plus one in
+  `readme-examples.test.mjs`. `# fail 2` is stated in the declaration rather than
+  left for a reader to discover in a log, and the paragraph says plainly that
+  `test.skip` and a lowered floor are both the wrong repair.
+- **`test/gate_self_test.sh`'s copies can see the cafaye fleet.** Every copy runs
+  the whole suite, and `test/spec-drift.test.mjs` resolves the six checkouts
+  relative to the repository it runs in — so a copy under `$TMPDIR` skipped
+  eleven times, which failed `suite-no-skip` *and* dropped `# pass` by eleven,
+  which failed the floor. Both fired on the control, and the self-test reported a
+  red that had nothing to do with `gate.yml`. It now hands every copy
+  `CAFAYE_WORKSPACE`, resolved by importing this repository's own
+  `scripts/lib/workspace.mjs` rather than by re-deriving the search order.
+  Measured before the fix, over a copy of a repository whose own suite prints
+  208 passing and 0 skipped: `# pass 188  # fail 10  # skipped 11`.
+- **Its case 11 read a hardcoded floor.** It was `edit 'minimum: 187'
+  'minimum: 188'`, correct when 187 was the floor and silently stale since
+  cafaye-ts-01b raised it to 201 — a stale anchor exits 2 *after* everything above
+  it has printed green. It now reads the live number and adds one, with a `grep
+  -Eo` rather than a `sed` `\+` because BSD sed reads that as a literal plus, so
+  the case only worked on Linux.
+- **The control's proving half no longer requires exit 0, and says why.** The
+  suite is red by design, so the exit code is no longer a signal; what the
+  control now requires is stronger — both count proofs satisfied, and
+  `gate.nonzero` the *only* finding that fired. Case 13's `gate.nonzero` clause
+  is gone, with the removal explained at the case rather than made quietly.
+- **`test/readme-examples.test.mjs` locates the operation table by its heading,
+  and checks the new gap table too.** Its locator was "the first line starting
+  with ``| `identity` ``", and the README's new section has a row about identity's
+  tenancy that came first — so the test reported the README as claiming 10
+  operations where the index records 31. A real mismatch, the wrong row. It also
+  had no opinion about the gap table, which is a claim about a gap and the kind
+  that rots quietly; the numbers there are now read out of
+  `scripts/lib/capability.mjs` and compared, so an operation documented upstream
+  fails a test with a number rather than a reader planning around a gap that
+  closed months ago.
+- **Three stale numbers in `README.md`.** The headline said 53 generated
+  operations when the table beneath it said 70 and the tree has 70 — it was
+  written before cafaye-ts-01b added seventeen. The `specs/index.json` example
+  quoted `59247b6…` and `"operations": 8` for courier, where the index says
+  `467cd3e…` and `10`. And "your copy of `identity` is behind" was true when
+  written and is now a general statement with today's measurements on it.
+- **`test/lib/dist.mjs` moved to `scripts/lib/dist.mjs`**, because
+  `scripts/capability.mjs` needs the same built-package loader and a script
+  reaching into `test/` would make the test directory a library the shipped
+  scripts depend on. The old path stays as a re-export so no test file changed,
+  and so a reader opening a test still sees a path that reads as test
+  infrastructure.
+
 ### Changed
+
+- **The README says what you cannot do yet.** A new section before "What is in
+  the box", because a generated client is exactly as capable as the documents it
+  came from and a customer planning an integration is the person who needs to
+  know that, not a person reading a report.
+- **The README says what `expectOperations` is worth.** It is a tripwire on a
+  document's *size*. A document that loses one operation and gains another moves
+  no count, the vendor recomputes the sha256, and every check here passes over a
+  client that has silently lost a method. That is measured, in
+  `REPORT-cafaye-ts-02b.md` §5, and the section that used to imply the index
+  locks the surface now says what it locks.
+- **`scripts/lib/dist.mjs` and the new `scripts/lib/capability.mjs`** — see
+  above; the one implementation of "what can the built client do" is shared by
+  `npm run capability` and the gate.
+
+### Not changed, and why
+
+- **No re-vendor.** `identity` is four commits behind its published head and
+  `identity-27` did change its document, so the brief's drift warning was live.
+  It was checked and it does not move this finding: `identity-27` removed a
+  **409 response** from `POST /v1/email-verifications` and did not touch the
+  operation set — the same 31 operations at the same 26 paths, `info.version`
+  1.5.0 → 1.6.0. The ten tenancy operations are absent at `8337c52` exactly as
+  they are at the recorded `793977b…`. Re-vendoring would have moved the sha, the
+  document version and the generated tree, and fixed nothing this packet
+  measured. It is also a separate reviewed act with its own CHANGELOG entry, and
+  `courier-26` — which also changed its document, eight `'503'` responses — is two
+  commits behind for the same reason. Both are named in the report with the shas,
+  so the bump is a decision somebody makes on purpose.
 
 - **All six vendored documents re-copied at their current masters, and the client
   regenerated.** The client was describing services that had moved underneath it.

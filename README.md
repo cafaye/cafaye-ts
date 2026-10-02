@@ -13,7 +13,7 @@ That is the whole integration. You name where the fleet is and, if you have one,
 what to authenticate with; the class decides how to send the credential, applies
 a deadline, and turns every failure into an exception you can `catch` by type.
 
-Underneath it are 53 generated operations — a typed function per HTTP operation
+Underneath it are 70 generated operations — a typed function per HTTP operation
 across all six services, each carrying the specification's own prose, so your
 editor can tell you what an endpoint is for without you leaving the code. You do
 not import them. MD6's ruling was that generated code should stay an
@@ -252,6 +252,43 @@ import { Cafaye } from 'cafaye-ts';
 const cafaye = new Cafaye({ baseUrl: 'https://cafaye.example.com', timeoutMs: 5_000 });
 ```
 
+## What you cannot do through this client yet
+
+**Read this before you plan an integration.** A generated client is exactly as
+capable as the documents it was generated from, and two of the fleet's surfaces
+are not in those documents. Both are measured, and `npm run capability` prints
+the current answer:
+
+```sh
+npm run capability     # exits nonzero while anything is missing
+```
+
+| What is missing | How many | Whose it is |
+|---|---:|---|
+| `identity` tenancy — create/list/read/rename/delete an account, invite a member, accept an invitation, list and change members | 10 | `identity`. The service **serves** all ten; its OpenAPI document describes none of them, so no amount of re-vendoring produces a method. |
+| `identity`'s OpenID Connect provider surface — discovery, JWKS, token, userinfo, authorize | 5 | **This package.** They *are* documented, in a second document (`openid/openid.yaml`) that this package does not vendor. |
+
+**What that means in practice.** You can register a user and sign them in. You
+cannot give them a team to work in: there is no `createAccount`, no
+`createAccountInvitation`, no `acceptInvitation`, and no `listAccountMembers`.
+`mintApiKey` and `registerOidcClient` both take an `account_id` in the path, so
+they exist and are unreachable. If you are integrating this for a single user,
+you are fine. If you are integrating it for an organisation, you are not, and no
+amount of reading this package's types will tell you so — a missing method is a
+compile error, not a runtime one, and a `TypeError` at runtime if you are in
+JavaScript.
+
+**There is no workaround here and there is not going to be one.** Reach for
+`fetch` against the routes above if you need them today, exactly as you would
+have before this package existed. Do not expect a typed method to appear without
+`identity` documenting the operations first.
+
+**Why this section exists at all.** `test/customer-capability.test.mjs` asserts
+the same thing inside the gate, and it is **failing on purpose** — fifteen
+operations, named one by one, with the reason each one is on a customer's path.
+`REPORT-cafaye-ts-02b.md` has the measurements, including what closing each half
+takes and who owns it.
+
 ## What is in the box
 
 | Service | Operations | Paths | Document version |
@@ -327,9 +364,9 @@ repository.
   "service": "courier",
   "repository": "git@github.com:cafaye/courier.git",
   "path": "openapi.yaml",
-  "commit": "59247b6c65fd86a331a4f4bdcaf180ee1730687f",
-  "operations": 8,
-  "sha256": "20e65fc7c638..."
+  "commit": "467cd3efb849a339b3dae9eadb3c6b9882fbc1b9",
+  "operations": 10,
+  "sha256": "bfb2eff04dcd739..."
 }
 ```
 
@@ -337,12 +374,25 @@ A vendored document with no sha is a rumour. That is the whole reason the index
 exists, and it is why the test suite refuses to pass if a vendored file's bytes
 stop matching what the index says.
 
-**Your copy of `identity` is behind.** A change to identity's OpenAPI document was
-in flight when this package was built, and the vendored copy will be behind the
-moment it lands. That is expected: this package is rebuilt from the documents
-deliberately, by a human, in a reviewable diff — not continuously. If you need
-identity's newest routes, check the `commit` above against your deployed identity
-and wait for the next release, or build from source.
+**The count in the index is a count, not a set.** `expectOperations` catches a
+document that changed size, which is the common case and the one worth a hard
+stop. It does **not** catch a document that loses one operation and gains another:
+the count is unmoved, the sha256 is recomputed by the vendor, every check in this
+repository passes, and a client has silently lost a method. Measured on this
+tree — that swap is a real experiment, in `REPORT-cafaye-ts-02b.md` §5. The
+`expectOperations` field exists and this is what it is worth; read it as a
+tripwire on size, not as a lock on surface.
+
+**Your copy of a service can be behind, and how far is printed on every test
+run.** This package is rebuilt from the documents deliberately, by a human, in a
+reviewable diff — not continuously — so the recorded `commit` for any service can
+be behind that service's published head. Measured on 2026-10-02: `identity` four
+commits behind, `courier` two, `pantry` six, and `billing`, `muse` and `darkroom`
+current. A copy more than nine commits behind fails the suite, with the one
+command that closes it; below that it is reported on every run. If you need a
+service's newest routes, check its `commit` above against the identity you have
+deployed, and either `npm run vendor -- --service <name> --bump` from a checkout
+or build from source.
 
 ## What this is deliberately not
 

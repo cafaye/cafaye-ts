@@ -32,6 +32,8 @@
   "scripts": {
     "generate": "node scripts/generate.mjs",
     "vendor": "node scripts/vendor.mjs",
+    "capability": "node scripts/capability.mjs",
+    "capability:self-test": "bash test/capability_self_test.sh",
     "e2e:identity": "node scripts/e2e-identity.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --test --test-concurrency=1 \"test/**/*.test.mjs\"",

@@ -58,12 +58,42 @@ gate:
     # 1. The suite's own count. This is the decrease-detector, and it is the
     #    only one of the three that has a floor.
     #
-    #    201 is what `npm test` reported on this tree, measured, and it is
+    #    208 is what `npm test` reported on this tree, measured, and it is
     #    raised in the same commit that adds a test — a floor left behind is a
     #    floor nobody notices has stopped protecting anything. A suite that
     #    quietly lost forty tests cannot report itself as passing.
     #
-    #    The 187 it replaced was the cafaye-ts-02 floor. cafaye-ts-01b added
+    #    The 201 it replaced was the cafaye-ts-01b floor. cafaye-ts-02b added
+    #    `test/customer-capability.test.mjs` — six passing tests, and TWO THAT
+    #    FAIL ON PURPOSE — plus one in `readme-examples.test.mjs` that ties the
+    #    README's new gap table to the required set in
+    #    `scripts/lib/capability.mjs`, so a number in prose cannot go stale. The
+    #    floor counts PASSES, so a red test raises nothing and the seven green
+    #    ones raise it by seven; the arithmetic is stated here because "the floor
+    #    went up by exactly the number of new green tests" is a thing a reader
+    #    would otherwise have to reconstruct from a changelog.
+    #
+    #    208 IS ALSO A COUNT OF A SUITE THAT IS RED, and that is the point of
+    #    this proof in its current form. `node --test` exits nonzero when a test
+    #    fails, so `bin/prime` is nonzero and core's `gate.nonzero` fires — the
+    #    gate is red, by the ordinary mechanism, for a stated reason. The two
+    #    reds are ten `identity` tenancy operations that the service serves and
+    #    documents nowhere, plus five OpenID Connect operations documented in a
+    #    SECOND document this repository does not vendor. Both are named, with
+    #    the operation list, in `scripts/lib/capability.mjs` and by
+    #    `npm run capability`. Neither is fixable by regenerating, and neither
+    #    belongs to this repository to fix by hand; see REPORT-cafaye-ts-02b.md
+    #    for which of them is whose.
+    #
+    #    WHAT MUST NOT HAPPEN is the obvious repair. `test.skip` on the two reds
+    #    would leave `# pass` at 208 and `# skipped` at 2, and this file's second
+    #    proof fails — that is what `suite-no-skip` is for. Lowering the floor
+    #    to 205 to make the arithmetic tidier would be the same mistake with a
+    #    different number. The only thing that legitimately lowers `# fail` here
+    #    is the two upstream changes named above, and the first of them lands in
+    #    `identity`, not here.
+    #
+    #    The 187 before 201 was the cafaye-ts-02 floor. cafaye-ts-01b added
     #    `test/spec-drift.test.mjs` — eleven assertions covering all six
     #    services' recorded refs, their byte-equality at those refs, and the
     #    staleness report — plus two in `vendored-specs.test.mjs` that turn a
@@ -79,10 +109,37 @@ gate:
     #    --test` pointed at a glob that matches no file prints `# pass 0` and
     #    exits 0. That is the cafaye-rb defect — a tier that filtered itself out
     #    of existence, a green, and nothing that noticed — reproduced in
-    #    TypeScript. 0 < 201, so it is red here.
+    #    TypeScript. 0 < 208, so it is red here.
     - id: suite-pass
       match: '^# pass ([0-9]+)$'
-      minimum: 201
+      minimum: 208
+    # 1b. The count above cannot distinguish "everything passes" from "the right
+    #     number pass and the rest are skipped", and on THIS tree it cannot
+    #     distinguish "the right number pass" from "the right number pass and two
+    #     deliberate failures are failing". That is a real gap and it is stated
+    #     rather than left implicit.
+    #
+    #     There is no proof shape for "exactly two failures, and here they are":
+    #     `gate.proof` can match a line and can hold a floor, and `# fail 2` is
+    #     not a floor anybody wants in a gate declaration — the day identity
+    #     documents the tenancy surface the number goes to 0 and the floor goes
+    #     red, which is the correct direction but for a reason that reads like a
+    #     regression. So the count is a REPORT here, printed in the log by
+    #     `node --test` and asserted by nothing.
+    #
+    #     What holds the number instead is `test/capability_self_test.sh`, which
+    #     runs four cases against copies of this repository and requires the
+    #     control to be red with the two named verdicts, the fixed copy to be
+    #     green for tenancy and STILL red for OIDC, a hand-written method to fail
+    #     to satisfy anything, and a nine-of-ten document to be red again. If the
+    #     two reds ever stop being the two named findings, that script is what
+    #     says so. It is deliberately outside `prime`: the glob
+    #     `test/**/*.test.mjs` cannot match a `.sh`, and a self-test inside the
+    #     gate would mean the gate runs the check that fails on purpose.
+    #
+    #     The alternative — asserting `# fail 0` and shipping a green gate over
+    #     a client that cannot onboard a tenant — is the one this packet exists
+    #     to rule out.
     # 2. Nothing skipped, in the suite's own words.
     #
     #    This is the proof the count above cannot make on its own, and the case
@@ -185,3 +242,14 @@ ci:
   # checked anything above. CI proves both halves; the local gate proves the
   # pinned one, which is the one a local run can be trusted to have used.
   invokes: [bin/prime]
+  # AND THE WORKFLOW HAS TWO STEPS THAT RUN WHEN THAT ONE IS RED, which is
+  # unusual enough to say why. `bin/prime` is red on purpose — the two capability
+  # findings — and a red step that stops a job tells a reader only that something
+  # failed. So the workflow then runs `npm run capability`, which prints the
+  # fifteen operations with the reason each is on a customer's path, and
+  # `bash test/capability_self_test.sh`, which proves the check can go green and
+  # that a hand-written method cannot make it. Both are `continue-on-error`: they
+  # are reporting, not gating, and a report that fails a job is a gate. The
+  # declarations they read are `gate.proof` above and the `suite-pass` comment,
+  # and the two must move together — the workflow printing a list is only useful
+  # if the floor in this file still counts what the list says is failing.
