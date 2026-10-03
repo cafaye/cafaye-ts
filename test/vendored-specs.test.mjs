@@ -81,7 +81,11 @@ const MEASURED_OPERATIONS = {
   billing: 15,
   muse: 1,
   darkroom: 9,
-  pantry: 4,
+  // 4 -> 6: registry-compat-05 put the compatibility graph on the wire as two
+  // operations (requirements, required-by). Re-measured by hand from the
+  // document, not copied from the index, which is what makes this an
+  // independent count.
+  pantry: 6,
   courier: 10,
 };
 
@@ -155,7 +159,7 @@ describe('the vendoring index', () => {
       );
     }
     const total = FLEET.reduce((sum, s) => sum + MEASURED_OPERATIONS[s], 0);
-    assert.equal(total, 70, 'the fleet total moved; re-measure and record it in this test');
+    assert.equal(total, 72, 'the fleet total moved; re-measure and record it in this test');
   });
 });
 

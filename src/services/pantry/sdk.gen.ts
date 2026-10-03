@@ -3,14 +3,14 @@
 // Source: specs/pantry.yaml
 //         pantry, document version 1.1.0,
 //         vendored from git@github.com:cafaye/pantry.git
-//         at commit f009b8e2a968f5b1179bb40ca95270033986b6e3
+//         at commit de476a55940d4ee1de485c12d66ed6963122f628
 // Regenerate: npm run generate
 //            test/regeneration.test.mjs proves regeneration is a no-op,
 //            and that a hand-edit here is reverted by it.
 
 import { client } from './client.gen.js';
 import type { Client, ClientMeta, Options as Options2, RequestResult, TDataShape } from './client/index.js';
-import type { GetServiceData, GetServiceErrors, GetServiceResponses, HealthzData, HealthzResponses, ListServicesData, ListServicesErrors, ListServicesResponses, ReadyzData, ReadyzErrors, ReadyzResponses } from './types.gen.js';
+import type { GetServiceData, GetServiceErrors, GetServiceResponses, HealthzData, HealthzResponses, ListServiceRequiredByData, ListServiceRequiredByErrors, ListServiceRequiredByResponses, ListServiceRequirementsData, ListServiceRequirementsErrors, ListServiceRequirementsResponses, ListServicesData, ListServicesErrors, ListServicesResponses, ReadyzData, ReadyzErrors, ReadyzResponses } from './types.gen.js';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -54,6 +54,69 @@ export const listServices = <ThrowOnError extends boolean = false>(options?: Opt
  *
  */
 export const getService = <ThrowOnError extends boolean = false>(options: Options<GetServiceData, ThrowOnError>): RequestResult<GetServiceResponses, GetServiceErrors, ThrowOnError> => (options.client ?? client).get<GetServiceResponses, GetServiceErrors, ThrowOnError>({ url: '/v1/services/{name}', ...options });
+
+/**
+ * What one service needs in order to run
+ *
+ * The forward direction of the compatibility graph: the services this one
+ * declares a `requires` edge to, each with the version range the publisher
+ * constrains it to and whether the edge is `required`, `soft` or `dev`.
+ *
+ * The backward direction — "which services require this one?" — is
+ * `GET /v1/services/{name}/required-by`. They are two questions, not one
+ * question read from two ends: an operator choosing what to run reads
+ * this one, and an operator about to change a service reads that one
+ * before deciding the change is safe.
+ *
+ * **`requires` edges only.** `conflicts_with` is a different question —
+ * "what must I NOT run alongside this?" — and answering both under one
+ * name is how a caller ends up installing a conflict. It has no
+ * operation in this version; when it gets one it will get its own path,
+ * because the two answers must never be shape-compatible enough to
+ * substitute for each other.
+ *
+ * An edge appears here only when **both** of its endpoints are visible
+ * to the caller, which is a property of the row-level policy the
+ * database applies rather than a filter this operation performs: an edge
+ * from a published service into a draft is a fact about work in
+ * progress, and work in progress is not in the public graph.
+ *
+ * An unknown name is a `404`. A known service with no `requires` edges
+ * is `200` with `"data": []` — a leaf of the graph is an answer, not an
+ * absence.
+ *
+ */
+export const listServiceRequirements = <ThrowOnError extends boolean = false>(options: Options<ListServiceRequirementsData, ThrowOnError>): RequestResult<ListServiceRequirementsResponses, ListServiceRequirementsErrors, ThrowOnError> => (options.client ?? client).get<ListServiceRequirementsResponses, ListServiceRequirementsErrors, ThrowOnError>({ url: '/v1/services/{name}/requirements', ...options });
+
+/**
+ * What depends on one service
+ *
+ * The backward direction of the compatibility graph: the services that
+ * declare a `requires` edge **to** this one. This is the
+ * upgrade-safety question — before changing a service's contract,
+ * read this to learn who is reading it.
+ *
+ * The forward direction — "what do I need to run this?" — is
+ * `GET /v1/services/{name}/requirements`.
+ *
+ * **`requires` edges only**, for the same reason the forward direction
+ * gives: `conflicts_with` is a different fact and must not be
+ * shape-compatible with this answer.
+ *
+ * An edge appears here only when **both** of its endpoints are visible
+ * to the caller. In this direction that has a consequence worth naming:
+ * an edge **from** a draft service is hidden, so a service's public
+ * backward graph can grow as work in progress is published. That is
+ * the policy's answer rather than this operation's filter, and it is
+ * the conservative one — nothing here claims a dependency the caller
+ * cannot also read the other side of.
+ *
+ * An unknown name is a `404`. A service nothing requires is `200` with
+ * `"data": []` — most leaf services are in that state, and it is an
+ * answer rather than an absence.
+ *
+ */
+export const listServiceRequiredBy = <ThrowOnError extends boolean = false>(options: Options<ListServiceRequiredByData, ThrowOnError>): RequestResult<ListServiceRequiredByResponses, ListServiceRequiredByErrors, ThrowOnError> => (options.client ?? client).get<ListServiceRequiredByResponses, ListServiceRequiredByErrors, ThrowOnError>({ url: '/v1/services/{name}/required-by', ...options });
 
 /**
  * Liveness

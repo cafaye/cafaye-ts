@@ -3,10 +3,10 @@
 // Source: specs/pantry.yaml
 //         pantry, document version 1.1.0,
 //         vendored from git@github.com:cafaye/pantry.git
-//         at commit f009b8e2a968f5b1179bb40ca95270033986b6e3
+//         at commit de476a55940d4ee1de485c12d66ed6963122f628
 // Regenerate: npm run generate
 //            test/regeneration.test.mjs proves regeneration is a no-op,
 //            and that a hand-edit here is reverted by it.
 
-export { getService, healthz, listServices, type Options, readyz } from './sdk.gen.js';
-export type { ClientOptions, Dependency, Exposes, GetServiceData, GetServiceError, GetServiceErrors, GetServiceResponse, GetServiceResponses, Health, HealthzData, HealthzResponse, HealthzResponses, Language, ListServicesData, ListServicesError, ListServicesErrors, ListServicesResponse, ListServicesResponses, Owner, Page, Problem, Readiness, ReadyzData, ReadyzError, ReadyzErrors, ReadyzResponse, ReadyzResponses, Repository, Service, ServiceKind, ServiceList } from './types.gen.js';
+export { getService, healthz, listServiceRequiredBy, listServiceRequirements, listServices, type Options, readyz } from './sdk.gen.js';
+export type { ClientOptions, CompatibilityEdge, Dependency, Exposes, GetServiceData, GetServiceError, GetServiceErrors, GetServiceResponse, GetServiceResponses, Health, HealthzData, HealthzResponse, HealthzResponses, Language, ListServiceRequiredByData, ListServiceRequiredByError, ListServiceRequiredByErrors, ListServiceRequiredByResponse, ListServiceRequiredByResponses, ListServiceRequirementsData, ListServiceRequirementsError, ListServiceRequirementsErrors, ListServiceRequirementsResponse, ListServiceRequirementsResponses, ListServicesData, ListServicesError, ListServicesErrors, ListServicesResponse, ListServicesResponses, Owner, Page, Problem, Readiness, ReadyzData, ReadyzError, ReadyzErrors, ReadyzResponse, ReadyzResponses, Repository, Service, ServiceKind, ServiceList, ServiceRequiredBy, ServiceRequirements } from './types.gen.js';
