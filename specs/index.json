@@ -72,14 +72,14 @@
       "repository": "git@github.com:cafaye/pantry.git",
       "path": "openapi/v1.yaml",
       "spec": "specs/pantry.yaml",
-      "commit": "f009b8e2a968f5b1179bb40ca95270033986b6e3",
-      "expectOperations": 4,
+      "commit": "de476a55940d4ee1de485c12d66ed6963122f628",
+      "expectOperations": 6,
       "openapi": "3.1.0",
       "infoVersion": "1.1.0",
-      "paths": 4,
-      "operations": 4,
-      "sha256": "855604ebe7bdebadecb26a23b024a8d1019d62a37790a64f3588ba1d15dbb175",
-      "bytes": 21577
+      "paths": 6,
+      "operations": 6,
+      "sha256": "7ba45bfbd1bbf77501ae13fce695bd6c81f3d81096e687a049ecf6be2b95fa79",
+      "bytes": 31490
     },
     {
       "service": "courier",

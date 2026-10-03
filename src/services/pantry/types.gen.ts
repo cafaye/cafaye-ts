@@ -3,7 +3,7 @@
 // Source: specs/pantry.yaml
 //         pantry, document version 1.1.0,
 //         vendored from git@github.com:cafaye/pantry.git
-//         at commit f009b8e2a968f5b1179bb40ca95270033986b6e3
+//         at commit de476a55940d4ee1de485c12d66ed6963122f628
 // Regenerate: npm run generate
 //            test/regeneration.test.mjs proves regeneration is a no-op,
 //            and that a hand-edit here is reverted by it.
@@ -171,6 +171,75 @@ export type Readiness = {
 };
 
 /**
+ * One `requires` edge of the compatibility graph, seen from one of its
+ * two endpoints. `name` is the OTHER endpoint: the required service when
+ * the edge is read forward, the requiring service when it is read
+ * backward. Which direction is in force is the operation that returned
+ * the edge, not a field on it — a field that restates the direction
+ * invites a caller to treat the two responses as interchangeable, which
+ * is the substitution the graph exists to prevent.
+ *
+ */
+export type CompatibilityEdge = {
+    /**
+     * The other endpoint of the edge.
+     */
+    name: string;
+    /**
+     * The publisher's own constraint on the other endpoint's contract
+     * version, in core's four-form grammar, stored verbatim. It is not
+     * re-rendered, because a range the publisher wrote is a claim about
+     * what they tested against and re-rendering it into an equivalent
+     * form would be this registry quietly editing somebody's claim.
+     *
+     */
+    version_range: string;
+    /**
+     * How hard the edge binds. `required` — the service does not start
+     * without it. `soft` — it starts and runs degraded, which is muse's
+     * own `required: false` written as a word. `dev` — build and test
+     * time only.
+     *
+     */
+    dependency: 'required' | 'soft' | 'dev';
+};
+
+/**
+ * The forward answer: what running `service` needs. `data` holds only
+ * `requires` edges, and an edge is present only when both of its
+ * endpoints are visible to the caller.
+ *
+ */
+export type ServiceRequirements = {
+    /**
+     * The subject — the service whose requirements these are, echoing the path parameter rather than leaving the caller to remember it.
+     */
+    service: string;
+    /**
+     * The `requires` edges, ordered by the required service's name. Empty when the service is a leaf of the graph.
+     */
+    data: Array<CompatibilityEdge>;
+};
+
+/**
+ * The backward answer: what depends on `service`. Same edge shape as the
+ * forward answer with the direction reversed, and deliberately a
+ * DIFFERENT object — a client that confuses the two questions gets a
+ * type error rather than an outage.
+ *
+ */
+export type ServiceRequiredBy = {
+    /**
+     * The subject — the service being depended on, echoing the path parameter.
+     */
+    service: string;
+    /**
+     * The `requires` edges pointing at the subject, ordered by the requiring service's name. Empty when nothing requires it.
+     */
+    data: Array<CompatibilityEdge>;
+};
+
+/**
  * RFC 9457 problem details with core's extensions: a stable
  * `https://errors.cafaye.com/<code>` type, a reserved `code`, and a
  * `trace_id` that always matches the `X-Trace-Id` header. No service
@@ -313,6 +382,74 @@ export type GetServiceResponses = {
 };
 
 export type GetServiceResponse = GetServiceResponses[keyof GetServiceResponses];
+
+export type ListServiceRequirementsData = {
+    body?: never;
+    path: {
+        /**
+         * The cafaye namespace name, which is also the repository name.
+         */
+        name: string;
+    };
+    query?: never;
+    url: '/v1/services/{name}/requirements';
+};
+
+export type ListServiceRequirementsErrors = {
+    /**
+     * No official cafaye service is registered under that name.
+     */
+    404: Problem;
+    /**
+     * The registry did not load.
+     */
+    503: Problem;
+};
+
+export type ListServiceRequirementsError = ListServiceRequirementsErrors[keyof ListServiceRequirementsErrors];
+
+export type ListServiceRequirementsResponses = {
+    /**
+     * The service's `requires` edges.
+     */
+    200: ServiceRequirements;
+};
+
+export type ListServiceRequirementsResponse = ListServiceRequirementsResponses[keyof ListServiceRequirementsResponses];
+
+export type ListServiceRequiredByData = {
+    body?: never;
+    path: {
+        /**
+         * The cafaye namespace name, which is also the repository name.
+         */
+        name: string;
+    };
+    query?: never;
+    url: '/v1/services/{name}/required-by';
+};
+
+export type ListServiceRequiredByErrors = {
+    /**
+     * No official cafaye service is registered under that name.
+     */
+    404: Problem;
+    /**
+     * The registry did not load.
+     */
+    503: Problem;
+};
+
+export type ListServiceRequiredByError = ListServiceRequiredByErrors[keyof ListServiceRequiredByErrors];
+
+export type ListServiceRequiredByResponses = {
+    /**
+     * The edges that require this service.
+     */
+    200: ServiceRequiredBy;
+};
+
+export type ListServiceRequiredByResponse = ListServiceRequiredByResponses[keyof ListServiceRequiredByResponses];
 
 export type HealthzData = {
     body?: never;

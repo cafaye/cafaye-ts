@@ -13,7 +13,7 @@ That is the whole integration. You name where the fleet is and, if you have one,
 what to authenticate with; the class decides how to send the credential, applies
 a deadline, and turns every failure into an exception you can `catch` by type.
 
-Underneath it are 70 generated operations — a typed function per HTTP operation
+Underneath it are 72 generated operations — a typed function per HTTP operation
 across all six services, each carrying the specification's own prose, so your
 editor can tell you what an endpoint is for without you leaving the code. You do
 not import them. MD6's ruling was that generated code should stay an
@@ -297,9 +297,9 @@ takes and who owns it.
 | `billing` | 15 | 11 | 1.3.0 |
 | `muse` | 1 | 1 | 1.1.0 |
 | `darkroom` | 9 | 7 | 1.0.0 |
-| `pantry` | 4 | 4 | 1.1.0 |
+| `pantry` | 6 | 6 | 1.1.0 |
 | `courier` | 10 | 6 | 2.2.0 |
-| **total** | **70** | | |
+| **total** | **72** | | |
 
 All six documents are OpenAPI 3.1. The counts are measured from the documents
 themselves and asserted by the test suite; if a service's document changes size,

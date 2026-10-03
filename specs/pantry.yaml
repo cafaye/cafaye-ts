@@ -275,6 +275,161 @@ paths:
               schema:
                 $ref: '#/components/schemas/Problem'
 
+  /v1/services/{name}/requirements:
+    get:
+      operationId: listServiceRequirements
+      summary: What one service needs in order to run
+      description: |
+        The forward direction of the compatibility graph: the services this one
+        declares a `requires` edge to, each with the version range the publisher
+        constrains it to and whether the edge is `required`, `soft` or `dev`.
+
+        The backward direction — "which services require this one?" — is
+        `GET /v1/services/{name}/required-by`. They are two questions, not one
+        question read from two ends: an operator choosing what to run reads
+        this one, and an operator about to change a service reads that one
+        before deciding the change is safe.
+
+        **`requires` edges only.** `conflicts_with` is a different question —
+        "what must I NOT run alongside this?" — and answering both under one
+        name is how a caller ends up installing a conflict. It has no
+        operation in this version; when it gets one it will get its own path,
+        because the two answers must never be shape-compatible enough to
+        substitute for each other.
+
+        An edge appears here only when **both** of its endpoints are visible
+        to the caller, which is a property of the row-level policy the
+        database applies rather than a filter this operation performs: an edge
+        from a published service into a draft is a fact about work in
+        progress, and work in progress is not in the public graph.
+
+        An unknown name is a `404`. A known service with no `requires` edges
+        is `200` with `"data": []` — a leaf of the graph is an answer, not an
+        absence.
+      parameters:
+        - name: name
+          in: path
+          required: true
+          description: The cafaye namespace name, which is also the repository name.
+          schema:
+            type: string
+            pattern: '^[a-z][a-z0-9]*(-[a-z0-9]+)*$'
+          example: courier
+      responses:
+        '200':
+          description: The service's `requires` edges.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceRequirements'
+        '404':
+          description: No official cafaye service is registered under that name.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                default:
+                  value:
+                    type: https://errors.cafaye.com/not_found
+                    title: Not found
+                    status: 404
+                    detail: no official cafaye service is named "nope"
+                    instance: /v1/services/nope/requirements
+                    code: not_found
+                    trace_id: 0af7651916cd43dd8448eb211c80319c
+        '503':
+          description: The registry did not load.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /v1/services/{name}/required-by:
+    get:
+      operationId: listServiceRequiredBy
+      summary: What depends on one service
+      description: |
+        The backward direction of the compatibility graph: the services that
+        declare a `requires` edge **to** this one. This is the
+        upgrade-safety question — before changing a service's contract,
+        read this to learn who is reading it.
+
+        The forward direction — "what do I need to run this?" — is
+        `GET /v1/services/{name}/requirements`.
+
+        **`requires` edges only**, for the same reason the forward direction
+        gives: `conflicts_with` is a different fact and must not be
+        shape-compatible with this answer.
+
+        An edge appears here only when **both** of its endpoints are visible
+        to the caller. In this direction that has a consequence worth naming:
+        an edge **from** a draft service is hidden, so a service's public
+        backward graph can grow as work in progress is published. That is
+        the policy's answer rather than this operation's filter, and it is
+        the conservative one — nothing here claims a dependency the caller
+        cannot also read the other side of.
+
+        An unknown name is a `404`. A service nothing requires is `200` with
+        `"data": []` — most leaf services are in that state, and it is an
+        answer rather than an absence.
+      parameters:
+        - name: name
+          in: path
+          required: true
+          description: The cafaye namespace name, which is also the repository name.
+          schema:
+            type: string
+            pattern: '^[a-z][a-z0-9]*(-[a-z0-9]+)*$'
+          example: identity
+      responses:
+        '200':
+          description: The edges that require this service.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceRequiredBy'
+        '404':
+          description: No official cafaye service is registered under that name.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                default:
+                  value:
+                    type: https://errors.cafaye.com/not_found
+                    title: Not found
+                    status: 404
+                    detail: no official cafaye service is named "nope"
+                    instance: /v1/services/nope/required-by
+                    code: not_found
+                    trace_id: 0af7651916cd43dd8448eb211c80319c
+        '503':
+          description: The registry did not load.
+          headers:
+            X-Trace-Id:
+              $ref: '#/components/headers/TraceId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
   /healthz:
     get:
       operationId: healthz
@@ -531,6 +686,83 @@ components:
         services:
           type: integer
           description: How many services are loaded.
+
+    CompatibilityEdge:
+      type: object
+      additionalProperties: false
+      description: |
+        One `requires` edge of the compatibility graph, seen from one of its
+        two endpoints. `name` is the OTHER endpoint: the required service when
+        the edge is read forward, the requiring service when it is read
+        backward. Which direction is in force is the operation that returned
+        the edge, not a field on it — a field that restates the direction
+        invites a caller to treat the two responses as interchangeable, which
+        is the substitution the graph exists to prevent.
+      required: [name, version_range, dependency]
+      properties:
+        name:
+          type: string
+          description: The other endpoint of the edge.
+          pattern: '^[a-z][a-z0-9]*(-[a-z0-9]+)*$'
+          example: identity
+        version_range:
+          type: string
+          description: |
+            The publisher's own constraint on the other endpoint's contract
+            version, in core's four-form grammar, stored verbatim. It is not
+            re-rendered, because a range the publisher wrote is a claim about
+            what they tested against and re-rendering it into an equivalent
+            form would be this registry quietly editing somebody's claim.
+          pattern: '^(\^|~|>=)?[0-9]+\.[0-9]+\.[0-9]+$'
+          example: ^0.1.0
+        dependency:
+          type: string
+          description: |
+            How hard the edge binds. `required` — the service does not start
+            without it. `soft` — it starts and runs degraded, which is muse's
+            own `required: false` written as a word. `dev` — build and test
+            time only.
+          enum: [required, soft, dev]
+          example: required
+
+    ServiceRequirements:
+      type: object
+      additionalProperties: false
+      description: |
+        The forward answer: what running `service` needs. `data` holds only
+        `requires` edges, and an edge is present only when both of its
+        endpoints are visible to the caller.
+      required: [service, data]
+      properties:
+        service:
+          type: string
+          description: The subject — the service whose requirements these are, echoing the path parameter rather than leaving the caller to remember it.
+          pattern: '^[a-z][a-z0-9]*(-[a-z0-9]+)*$'
+        data:
+          type: array
+          description: The `requires` edges, ordered by the required service's name. Empty when the service is a leaf of the graph.
+          items:
+            $ref: '#/components/schemas/CompatibilityEdge'
+
+    ServiceRequiredBy:
+      type: object
+      additionalProperties: false
+      description: |
+        The backward answer: what depends on `service`. Same edge shape as the
+        forward answer with the direction reversed, and deliberately a
+        DIFFERENT object — a client that confuses the two questions gets a
+        type error rather than an outage.
+      required: [service, data]
+      properties:
+        service:
+          type: string
+          description: The subject — the service being depended on, echoing the path parameter.
+          pattern: '^[a-z][a-z0-9]*(-[a-z0-9]+)*$'
+        data:
+          type: array
+          description: The `requires` edges pointing at the subject, ordered by the requiring service's name. Empty when nothing requires it.
+          items:
+            $ref: '#/components/schemas/CompatibilityEdge'
 
     Problem:
       type: object
